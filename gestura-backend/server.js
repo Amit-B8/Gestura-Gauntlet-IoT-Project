@@ -2,13 +2,29 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-const mqtt = require('mqtt');
+const net = require('net');
+const aedes = require('aedes')();
 
 process.loadEnvFile();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// --- MQTT BROKER (Hosts the broker locally) ---
+const MQTT_BROKER_PORT = Number(process.env.MQTT_BROKER_PORT || 1883);
+const brokerServer = net.createServer(aedes.handle);
+brokerServer.listen(MQTT_BROKER_PORT, () => {
+  console.log(`MQTT broker listening on tcp://0.0.0.0:${MQTT_BROKER_PORT}`);
+});
+
+// Broker connection logs
+aedes.on('clientReady', (client) => {
+  console.log(`MQTT client connected: ${client && client.id ? client.id : 'unknown'}`);
+});
+aedes.on('clientDisconnect', (client) => {
+  console.log(`MQTT client disconnected: ${client && client.id ? client.id : 'unknown'}`);
+});
 
 // Set up the HTTP server and WebSockets
 const server = http.createServer(app);
@@ -21,25 +37,30 @@ const io = new Server(server, {
 
 let currentMode = 'passive';
 
-// --- MQTT SETUP (Talks to Pico) ---
-const MQTT_URL = process.env.MQTT_URL || 'mqtt://localhost:1883';
+// --- MQTT TOPICS (Broker-owned) ---
 const MQTT_TOPIC_SENSORS = 'gauntlet/sensors';
 const MQTT_TOPIC_MODE = 'gauntlet/mode';
 
-const mqttClient = mqtt.connect(MQTT_URL);
+function publishMode(mode) {
+  aedes.publish({
+    topic: MQTT_TOPIC_MODE,
+    payload: Buffer.from(String(mode).toUpperCase()),
+    qos: 0,
+    retain: true
+  });
+}
 
-mqttClient.on('connect', () => {
-  console.log(`MQTT connected: ${MQTT_URL}`);
-  mqttClient.subscribe(MQTT_TOPIC_SENSORS);
-  // Publish current mode on connect so the Pico syncs immediately
-  mqttClient.publish(MQTT_TOPIC_MODE, currentMode.toUpperCase());
-});
-
-mqttClient.on('message', (topic, message) => {
-  if (topic !== MQTT_TOPIC_SENSORS) return;
+// Relay broker publishes to the frontend
+aedes.on('publish', (packet, client) => {
+  if (packet.topic !== MQTT_TOPIC_SENSORS) return;
 
   try {
-    const data = JSON.parse(message.toString());
+    const data = JSON.parse(packet.payload.toString());
+    // console.log(
+    //   `MQTT sensor update from ${client && client.id ? client.id : 'unknown'}: ` +
+    //   `x=${data.x ?? 0}, y=${data.y ?? 0}, z=${data.z ?? 0}, ` +
+    //   `gx=${data.gx ?? 0}, gy=${data.gy ?? 0}, gz=${data.gz ?? 0}`
+    // );
     const payload = {
       x: data.x ?? 0,
       y: data.y ?? 0,
@@ -60,15 +81,15 @@ io.on('connection', (socket) => {
   
   // Send the current mode to the dashboard as soon as it loads
   socket.emit('modeUpdate', currentMode);
+  // Sync the Pico immediately on new frontend connections
+  publishMode(currentMode);
 
   // Listen for the dashboard clicking 'Active' or 'Passive'
   socket.on('setMode', (mode) => {
     currentMode = mode;
     console.log('Mode changed to:', mode);
     io.emit('modeUpdate', currentMode); // Update all connected screens
-    if (mqttClient.connected) {
-      mqttClient.publish(MQTT_TOPIC_MODE, currentMode.toUpperCase());
-    }
+    publishMode(currentMode);
   });
 
   socket.on('disconnect', () => {
@@ -90,7 +111,7 @@ app.post('/api/data', (req, res) => {
   res.json({ mode: currentMode });
 });
 
-const PORT = process.env.PORT;
+const PORT = Number(process.env.PORT || 3001);
 server.listen(PORT, () => {
   console.log(`Gestura Broker running on http://localhost:${PORT}`);
 });
