@@ -7,6 +7,7 @@ from system_init import hardware_check, connect_wifi
 from modules.gui import GauntletGUI
 from modules.mpu6050 import MPU6050
 from modules.button import GauntletButton
+from modules.state import StateStore
 
 # --- CONFIGURATION ---
 WIFI_SSID = "UI-DeviceNet"
@@ -46,11 +47,17 @@ async def network_task(gui):
     while True:
         try:
             mqtt_client.check_msg()
-            if gui.state.get("mode") == "PASSIVE":
+            
+            # Publish live sensor data if we are in passive mode
+            state = gui.state_store.snapshot()
+            if state.get("mode") == "PASSIVE":
                 payload = ujson.dumps({
-                    "x": gui.state.get("x_val", 0.0),
-                    "y": gui.state.get("y_val", 0.0),
-                    "z": gui.state.get("z_val", 0.0)
+                    "x": state.get("accel_x", 0.0),
+                    "y": state.get("accel_y", 0.0),
+                    "z": state.get("accel_z", 0.0),
+                    "gx": state.get("gyro_x", 0.0),
+                    "gy": state.get("gyro_y", 0.0),
+                    "gz": state.get("gyro_z", 0.0)
                 })
                 mqtt_client.publish(b"gauntlet/sensors", payload)
         except Exception as e:
@@ -61,10 +68,14 @@ async def sensor_task(gui, mpu):
     while True:
         try:
             accel_data = mpu.get_accel()
+            gyro_data = mpu.get_gyro()
             gui.update_state(
-                x_val=accel_data['x'],
-                y_val=accel_data['y'],
-                z_val=accel_data['z']
+                accel_x=accel_data['x'],
+                accel_y=accel_data['y'],
+                accel_z=accel_data['z'],
+                gyro_x=gyro_data['x'],
+                gyro_y=gyro_data['y'],
+                gyro_z=gyro_data['z']
             )
         except Exception as e:
             pass
