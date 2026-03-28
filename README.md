@@ -21,3 +21,14 @@ The system operates in two main modes:
 ## 🚀 Getting Started
 
 *(Instructions for flashing the Pico W, starting the Node server, and running the React dashboard will be added as the project develops during the sprint).*
+
+OLED Pin OUT:
+Wiring Instructions:
+
+VCC ➔ 3.3V Out (Pico Physical Pin 36) - Red Wire
+
+GND ➔ GND (Pico Physical Pin 38) - Black Wire
+
+SCL ➔ GP5 (Pico Physical Pin 7) - White Wire
+
+SDA ➔ GP4 (Pico Physical Pin 6) - Yellow Wire
