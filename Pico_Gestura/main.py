@@ -6,6 +6,7 @@ from umqtt.simple import MQTTClient
 from system_init import hardware_check, connect_wifi
 from modules.gui import GauntletGUI
 from modules.mpu6050 import MPU6050
+from modules.state import StateStore
 
 # --- CONFIGURATION ---
 WIFI_SSID = "UI-DeviceNet"
@@ -51,11 +52,15 @@ async def network_task(gui):
             mqtt_client.check_msg()
             
             # Publish live sensor data if we are in passive mode
-            if gui.state.get("mode") == "PASSIVE":
+            state = gui.state_store.snapshot()
+            if state.get("mode") == "PASSIVE":
                 payload = ujson.dumps({
-                    "x": gui.state.get("x_val", 0.0),
-                    "y": gui.state.get("y_val", 0.0),
-                    "z": gui.state.get("z_val", 0.0)
+                    "x": state.get("accel_x", 0.0),
+                    "y": state.get("accel_y", 0.0),
+                    "z": state.get("accel_z", 0.0),
+                    "gx": state.get("gyro_x", 0.0),
+                    "gy": state.get("gyro_y", 0.0),
+                    "gz": state.get("gyro_z", 0.0)
                 })
                 mqtt_client.publish(b"gauntlet/sensors", payload)
                 
@@ -70,10 +75,14 @@ async def sensor_task(gui, mpu):
     while True:
         try:
             accel_data = mpu.get_accel()
+            gyro_data = mpu.get_gyro()
             gui.update_state(
-                x_val=accel_data['x'],
-                y_val=accel_data['y'],
-                z_val=accel_data['z']
+                accel_x=accel_data['x'],
+                accel_y=accel_data['y'],
+                accel_z=accel_data['z'],
+                gyro_x=gyro_data['x'],
+                gyro_y=gyro_data['y'],
+                gyro_z=gyro_data['z']
             )
         except Exception as e:
             pass # Ignore occasional I2C read errors
@@ -90,7 +99,8 @@ async def main():
         # Initialize the hardware
         mpu = MPU6050(i2c)
         global global_gui
-        global_gui = GauntletGUI(i2c)
+        state_store = StateStore()
+        global_gui = GauntletGUI(i2c, state_store)
         
     except Exception as e:
         trigger_hardware_panic(str(e))

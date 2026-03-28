@@ -27,6 +27,21 @@ class MPU6050:
             'z': z / 16384.0
         }
 
+    def get_gyro(self):
+        # Read 6 bytes of gyroscope data starting from register 0x43
+        data = self.i2c.readfrom_mem(self.addr, 0x43, 6)
+
+        x = self._bytes_to_int(data[0], data[1])
+        y = self._bytes_to_int(data[2], data[3])
+        z = self._bytes_to_int(data[4], data[5])
+
+        # Default +/- 250 dps range has a scale factor of 131
+        return {
+            'x': x / 131.0,
+            'y': y / 131.0,
+            'z': z / 131.0
+        }
+
     def _bytes_to_int(self, msb, lsb):
         # Bitwise shift to combine the two 8-bit numbers into a 16-bit number
         val = (msb << 8) | lsb
