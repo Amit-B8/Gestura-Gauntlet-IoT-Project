@@ -3,9 +3,8 @@
 
 PORT=3001
 
-# IP of the machine running Mosquitto (or any MQTT broker)
-# If Mosquitto is on the same machine as this server, localhost works
-MQTT_URL=mqtt://localhost:1883
+# Port for the embedded MQTT broker (Pico connects here)
+MQTT_BROKER_PORT=1883
 
 # Local IP addresses of your Kasa devices
 # Find these in the Kasa mobile app under Device Info
