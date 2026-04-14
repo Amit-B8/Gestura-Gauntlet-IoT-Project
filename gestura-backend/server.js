@@ -74,6 +74,34 @@ aedes.on('publish', (packet, client) => {
     }
   }
 
+  const raw = packet.payload ? packet.payload.toString() : '';
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+    console.warn(
+      'MQTT sensor payload ignored (not JSON):',
+      trimmed.slice(0, 120)
+    );
+    return;
+  }
+
+  try {
+    const data = JSON.parse(trimmed);
+    // console.log(
+    //   `MQTT sensor update from ${client && client.id ? client.id : 'unknown'}: ` +
+    //   `x=${data.x ?? 0}, y=${data.y ?? 0}, z=${data.z ?? 0}, ` +
+    //   `gx=${data.gx ?? 0}, gy=${data.gy ?? 0}, gz=${data.gz ?? 0}`
+    // );
+    const payload = {
+      x: data.x ?? 0,
+      y: data.y ?? 0,
+      z: data.z ?? 0,
+      gx: data.gx ?? 0,
+      gy: data.gy ?? 0,
+      gz: data.gz ?? 0
+    };
+    io.emit('sensorData', payload);
+  } catch (err) {
+    console.error('MQTT sensor parse error:', err, 'payload=', trimmed.slice(0, 120));
   // 2. NEW: Handle Mode Toggles from the physical double-tap
   if (packet.topic === MQTT_TOPIC_MODE && client) {
     // The "client" check ensures we don't react to our own server messages
@@ -87,6 +115,7 @@ aedes.on('publish', (packet, client) => {
       io.emit('modeUpdate', currentMode);
     }
   }
+}
 });
 
 // --- WEBSOCKET CONNECTION (Talks to React) ---

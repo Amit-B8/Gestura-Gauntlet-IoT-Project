@@ -45,40 +45,53 @@ def mqtt_callback(topic, msg):
 async def network_task(gui, store):
     """Maintains the MQTT connection and publishes data."""
     mqtt_client.set_callback(mqtt_callback)
-    
-    try:
-        mqtt_client.connect()
-        mqtt_client.subscribe(b"gauntlet/mode")
-        gui.update_state(connected=True)
-        print("Connected to MQTT Broker!")
-    except Exception as e:
-        print("MQTT Connection Failed:", e)
-        gui.update_state(connected=False)
-        return
- 
+
+    reconnect_delay_ms = 500
+    max_delay_ms = 5000
+
     while True:
         try:
-            # Check for incoming mode changes from the dashboard
-            mqtt_client.check_msg()
-            
-            # Publish live sensor data if we are in passive mode
-            state = store.snapshot()
-            if state.get("mode") == "PASSIVE":
-                payload = ujson.dumps({
-                    "x": state.get("accel_x", 0.0),
-                    "y": state.get("accel_y", 0.0),
-                    "z": state.get("accel_z", 0.0),
-                    "gx": state.get("gyro_x", 0.0),
-                    "gy": state.get("gyro_y", 0.0),
-                    "gz": state.get("gyro_z", 0.0)
-                })
-                mqtt_client.publish(b"gauntlet/sensors", payload)
-                
+            mqtt_client.connect()
+            mqtt_client.subscribe(b"gauntlet/mode")
+            gui.update_state(connected=True)
+            print("Connected to MQTT Broker!")
+            reconnect_delay_ms = 500
         except Exception as e:
-            print("MQTT Error:", e)
-            
-        # Yield control. 20ms = 50Hz publish rate for buttery smooth UI tracking
-        await asyncio.sleep_ms(20)
+            print("MQTT Connection Failed:", e)
+            gui.update_state(connected=False)
+            await asyncio.sleep_ms(reconnect_delay_ms)
+            reconnect_delay_ms = min(max_delay_ms, reconnect_delay_ms * 2)
+            continue
+
+        while True:
+            try:
+                # Check for incoming mode changes from the dashboard
+                mqtt_client.check_msg()
+
+                # Publish live sensor data if we are in passive mode
+                state = store.snapshot()
+                if state.get("mode") == "PASSIVE":
+                    payload = ujson.dumps({
+                        "x": state.get("accel_x", 0.0),
+                        "y": state.get("accel_y", 0.0),
+                        "z": state.get("accel_z", 0.0),
+                        "gx": state.get("gyro_x", 0.0),
+                        "gy": state.get("gyro_y", 0.0),
+                        "gz": state.get("gyro_z", 0.0)
+                    }).encode("utf-8")
+                    mqtt_client.publish(b"gauntlet/sensors", payload)
+
+            except Exception as e:
+                print("MQTT Error:", e)
+                gui.update_state(connected=False)
+                try:
+                    mqtt_client.disconnect()
+                except Exception:
+                    pass
+                break
+
+            # Yield control. 20ms = 50Hz publish rate for buttery smooth UI tracking
+            await asyncio.sleep_ms(20)
  
 async def sensor_task(gui, mpu, store):
     """Constantly reads the physical I2C motion sensor."""
