@@ -52,26 +52,40 @@ function publishMode(mode) {
 
 // Relay broker publishes to the frontend
 aedes.on('publish', (packet, client) => {
-  if (packet.topic !== MQTT_TOPIC_SENSORS) return;
+  
+  // 1. Handle Sensor Data
+  if (packet.topic === MQTT_TOPIC_SENSORS) {
+    try {
+      const data = JSON.parse(packet.payload.toString());
+      const payload = {
+        x: data.x ?? 0,
+        y: data.y ?? 0,
+        z: data.z ?? 0,
+        gx: data.gx ?? 0,
+        gy: data.gy ?? 0,
+        gz: data.gz ?? 0
+      };
+      // Only blast sensor data if we are in passive mode
+      if (currentMode === 'passive') {
+        io.emit('sensorData', payload);
+      }
+    } catch (err) {
+      console.error('MQTT sensor parse error:', err);
+    }
+  }
 
-  try {
-    const data = JSON.parse(packet.payload.toString());
-    // console.log(
-    //   `MQTT sensor update from ${client && client.id ? client.id : 'unknown'}: ` +
-    //   `x=${data.x ?? 0}, y=${data.y ?? 0}, z=${data.z ?? 0}, ` +
-    //   `gx=${data.gx ?? 0}, gy=${data.gy ?? 0}, gz=${data.gz ?? 0}`
-    // );
-    const payload = {
-      x: data.x ?? 0,
-      y: data.y ?? 0,
-      z: data.z ?? 0,
-      gx: data.gx ?? 0,
-      gy: data.gy ?? 0,
-      gz: data.gz ?? 0
-    };
-    io.emit('sensorData', payload);
-  } catch (err) {
-    console.error('MQTT sensor parse error:', err);
+  // 2. NEW: Handle Mode Toggles from the physical double-tap
+  if (packet.topic === MQTT_TOPIC_MODE && client) {
+    // The "client" check ensures we don't react to our own server messages
+    const newMode = packet.payload.toString().toLowerCase();
+    
+    if (newMode === 'active' || newMode === 'passive') {
+      currentMode = newMode;
+      console.log('Hardware button toggled mode to:', currentMode);
+      
+      // Tell the React dashboard to flip its UI instantly
+      io.emit('modeUpdate', currentMode);
+    }
   }
 });
 
