@@ -54,8 +54,18 @@ function publishMode(mode) {
 aedes.on('publish', (packet, client) => {
   if (packet.topic !== MQTT_TOPIC_SENSORS) return;
 
+  const raw = packet.payload ? packet.payload.toString() : '';
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+    console.warn(
+      'MQTT sensor payload ignored (not JSON):',
+      trimmed.slice(0, 120)
+    );
+    return;
+  }
+
   try {
-    const data = JSON.parse(packet.payload.toString());
+    const data = JSON.parse(trimmed);
     // console.log(
     //   `MQTT sensor update from ${client && client.id ? client.id : 'unknown'}: ` +
     //   `x=${data.x ?? 0}, y=${data.y ?? 0}, z=${data.z ?? 0}, ` +
@@ -71,7 +81,7 @@ aedes.on('publish', (packet, client) => {
     };
     io.emit('sensorData', payload);
   } catch (err) {
-    console.error('MQTT sensor parse error:', err);
+    console.error('MQTT sensor parse error:', err, 'payload=', trimmed.slice(0, 120));
   }
 });
 
