@@ -3,7 +3,7 @@ class StateStore:
         self._state = {
             "connected": False,
             "mode": "INIT",
-            "action": "Starting...",
+            "action": "BOOTING...",
             "calibrate_req": False,
             "accel_x": 0.0,
             "accel_y": 0.0,
@@ -15,8 +15,8 @@ class StateStore:
 
     def update(self, **kwargs):
         for key, value in kwargs.items():
-            if key in self._state:
-                self._state[key] = value
+            # Support dynamic creation of keys just in case, or ensure they exist
+            self._state[key] = value
 
     def get(self, key, default=None):
         return self._state.get(key, default)

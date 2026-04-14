@@ -8,13 +8,16 @@ class GauntletButton:
         self.button = machine.Pin(pin_num, machine.Pin.IN, machine.Pin.PULL_UP)
 
     async def monitor(self, gui, mqtt_client):
-        print("--- Button Monitor Started ---")
+        print("--- Button Monitor Started (GP13) ---")
         
         while True:
             try:
-                # 1. Detect if the button is pressed down
-                if self.button.value() == 0: 
-                    # Record the exact millisecond the press started
+                # Debug: Print raw value occasionally if needed, but let's stick to logic
+                val = self.button.value()
+                
+                # 1. Detect if the button is pressed down (0 = Pressed for PULL_UP)
+                if val == 0: 
+                    print("Button Down detected...")
                     press_start = time.ticks_ms()
                     
                     # 2. Wait in this loop until the user lets go of the button
@@ -23,31 +26,24 @@ class GauntletButton:
                     
                     # 3. Calculate exactly how many milliseconds they held it
                     duration = time.ticks_diff(time.ticks_ms(), press_start)
+                    print(f"Button Released. Duration: {duration}ms")
                     
                     # --- HOLD FOR 1 SECOND: RECALIBRATE ---
-                    # 1000 milliseconds = 1 second
                     if duration >= 1000:
-                        print(">>> 1-SECOND HOLD: RESETTING TO ZERO <<<")
+                        print(">>> TRIGGERING RECALIBRATION <<<")
+                        gui.update_state(action="CALIBRATING...", calibrate_req=True)
                         
-                        # Step A: Tell the system to run the calibration mathematical offsets
-                        gui.update_state(action="Calibrating...", calibrate_req=True)
-                        
-                        # Step B: Wait exactly 3 seconds, as you requested
-                        # This freezes the button from doing anything else for 3 seconds
-                        print("Waiting 3 seconds...")
+                        # Wait 3 seconds to let user hold device still
                         await asyncio.sleep_ms(3000)
                         
-                        # Step C: Go back to normal passive senses
-                        print("Resuming main passive senses.")
-                        gui.update_state(action="Passive Sensing")
+                        gui.update_state(action="CALIBRATED!")
+                        await asyncio.sleep_ms(1000)
+                        gui.update_state(action="PASSIVE MODE")
                         
-                    # --- SHORT PRESS (Less than 1 second) ---
-                    # 50 milliseconds is our "debounce" to ignore electrical static
+                    # --- SHORT PRESS ---
                     elif duration > 50: 
-                        print(">>> SINGLE SHORT PRESS DETECTED <<<")
-                        gui.update_state(action="Action Sent")
-                        
-                        # If we have an active network connection, send the MQTT command
+                        print(">>> SHORT PRESS <<<")
+                        gui.update_state(action="ACTION SENT")
                         if mqtt_client:
                             mqtt_client.publish(b"gauntlet/action", b"single_press")
                             

@@ -88,8 +88,10 @@ async def sensor_task(gui, mpu, store):
             state = store.snapshot()
             if state.get("calibrate_req"):
                 print("Sensor task: Starting calibration...")
+                gui.update_state(action="CALIBRATING...")
                 mpu.calibrate(samples=100)
                 store.update(calibrate_req=False)
+                gui.update_state(action="READY")
                 print("Sensor task: Calibration finished.")
 
             accel_data = mpu.get_accel()

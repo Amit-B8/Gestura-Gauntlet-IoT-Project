@@ -21,23 +21,26 @@ class GauntletGUI:
         self.oled.text(conn_text, 0, 0)
         
         mode = state["mode"].upper()
-        self.oled.text(f"MODE: {mode}", 0, 16)
+        self.oled.text(f"MODE: {mode}", 0, 10)
         
-        # Action/Status
-        action = state.get("action", "")
-        if action:
-            self.oled.text(action, 0, 32)
-        
-        # Calibration Status
-        if state.get("calibrate_req"):
-            self.oled.text("CALIBRATING...", 0, 48)
-        else:
-            # Center Content (Conditional based on mode)
-            if mode == "PASSIVE":
-                self.oled.text(f"X: {state['accel_x']:.2f} Y: {state['accel_y']:.2f}", 0, 48)
-                self.oled.text(f"Z: {state['accel_z']:.2f}", 0, 56)
-            elif mode == "ACTIVE":
-                self.oled.text(">>> ACTIVE <<<", 16, 48)
+        # -----------------------------------------
+        # ACTION CENTER (Rows 25-40)
+        # This is where CALIBRATING and READY appear
+        # -----------------------------------------
+        action_text = state.get("action", "").upper()
+        if action_text:
+            # Draw a simple box or just center it
+            self.oled.text(">> " + action_text, 0, 25)
+
+        # -----------------------------------------
+        # SENSOR DATA (Bottom)
+        # -----------------------------------------
+        if mode == "PASSIVE":
+            # Show smaller coordinates at the bottom
+            self.oled.text(f"X:{state['accel_x']:>5.2f} Y:{state['accel_y']:>5.2f}", 0, 45)
+            self.oled.text(f"Z:{state['accel_z']:>5.2f}", 0, 55)
+        elif mode == "ACTIVE":
+            self.oled.text("GAUNTLET ACTIVE", 0, 50)
             
         self.oled.show()
 
