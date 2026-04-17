@@ -10,3 +10,19 @@ MQTT_BROKER_PORT=1883
 # Find these in the Kasa mobile app under Device Info
 PLUG_IP=192.168.1.XXX
 BULB_IP=192.168.1.XXX
+
+# Live gyro X-axis to Kasa bulb brightness control
+# Default maps gx=-1 to 0% and gx=+1 to 100% while mode is active.
+GYRO_BULB_CONTROL_ENABLED=true
+GYRO_BULB_CONTROL_MODE=active
+GYRO_BULB_AXIS=gx
+GYRO_BULB_AXIS_MIN=-1
+GYRO_BULB_AXIS_MAX=1
+GYRO_BULB_THROTTLE_MS=500
+GYRO_BULB_MIN_DELTA=2
+GYRO_BULB_SMOOTHING=0.35
+GYRO_BULB_TRANSITION_MS=150
+GYRO_BULB_POWER_OFF_AT_ZERO=true
+
+# Set false if you want live gyro bulb control without focus presets fighting it.
+FOCUS_KASA_ACTIONS_ENABLED=true

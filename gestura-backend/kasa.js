@@ -1,22 +1,77 @@
 /**
- * kasa.js — Gestura Gauntlet Kasa Device Manager
+ * kasa.js - Gestura Gauntlet Kasa Device Manager
  *
- * Handles lazy-initialization and control of the Kasa Smart Plug
- * and Kasa Smart Bulb over the local network.
- *
- * Lazy-init means the device objects are created on first use,
- * so the server boots cleanly even if devices are offline.
+ * Lazy-connects to Kasa devices and exposes small, safe helpers for plug,
+ * bulb, presets, status, and live sensor-driven brightness control.
  */
 
 const { Client } = require('tplink-smarthome-api');
 
 const kasaClient = new Client();
 
-// Device handles — populated on first successful connection
 let plug = null;
 let bulb = null;
+let lastBulbState = {};
+let bulbQueue = Promise.resolve();
 
-// ─── Internal: connect to a device by IP ─────────────────────────────────────
+const BULB_PRESETS = Object.freeze({
+  focused: {
+    on_off: 1,
+    brightness: 80,
+    color_temp: 4000,
+    transition_period: 1500,
+  },
+  break: {
+    on_off: 1,
+    brightness: 30,
+    color_temp: 2700,
+    transition_period: 2000,
+  },
+  alert: {
+    on_off: 1,
+    brightness: 100,
+    color_temp: 6000,
+    transition_period: 500,
+  },
+  night: {
+    on_off: 1,
+    brightness: 10,
+    color_temp: 2700,
+    transition_period: 1500,
+  },
+  off: {
+    on_off: 0,
+    transition_period: 500,
+  },
+});
+
+function clamp(value, min, max) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return min;
+  return Math.max(min, Math.min(max, numeric));
+}
+
+function clampPercent(value) {
+  return Math.round(clamp(value, 0, 100));
+}
+
+/** Map an axis value to percent. Default mapping: -1 => 0%, +1 => 100%. */
+function axisToPercent(value, min = -1, max = 1) {
+  const low = Number(min);
+  const high = Number(max);
+  if (!Number.isFinite(low) || !Number.isFinite(high) || low === high) {
+    throw new Error('Invalid axis range');
+  }
+
+  const axis = clamp(value, Math.min(low, high), Math.max(low, high));
+  const percent = ((axis - low) / (high - low)) * 100;
+  return clampPercent(percent);
+}
+
+function queueBulbCommand(task) {
+  bulbQueue = bulbQueue.then(task, task);
+  return bulbQueue;
+}
 
 async function getPlug() {
   if (plug) return plug;
@@ -38,108 +93,184 @@ async function getBulb() {
   return bulb;
 }
 
-// ─── Plug Controls ────────────────────────────────────────────────────────────
+function resetConnections() {
+  plug = null;
+  bulb = null;
+  lastBulbState = {};
+  return { success: true };
+}
 
-/**
- * Turn the smart plug on or off.
- * @param {boolean} state - true = on, false = off
- */
+async function getDeviceStatus() {
+  const status = {
+    plug: { configured: Boolean(process.env.PLUG_IP), connected: Boolean(plug) },
+    bulb: { configured: Boolean(process.env.BULB_IP), connected: Boolean(bulb), lastState: lastBulbState },
+  };
+
+  try {
+    if (process.env.PLUG_IP) {
+      const device = await getPlug();
+      status.plug.alias = device.alias;
+      if (typeof device.getPowerState === 'function') {
+        status.plug.power = await device.getPowerState();
+      }
+    }
+  } catch (err) {
+    plug = null;
+    status.plug.error = err.message;
+  }
+
+  try {
+    if (process.env.BULB_IP) {
+      const device = await getBulb();
+      status.bulb.alias = device.alias;
+      if (typeof device.getSysInfo === 'function') {
+        status.bulb.sysInfo = await device.getSysInfo();
+      }
+    }
+  } catch (err) {
+    bulb = null;
+    status.bulb.error = err.message;
+  }
+
+  return status;
+}
+
 async function setPlugPower(state) {
   try {
     const device = await getPlug();
-    await device.setPowerState(state);
-    console.log(`[Kasa] Plug turned ${state ? 'ON' : 'OFF'}`);
-    return { success: true, state };
+    const powerState = Boolean(state);
+    await device.setPowerState(powerState);
+    console.log(`[Kasa] Plug turned ${powerState ? 'ON' : 'OFF'}`);
+    return { success: true, state: powerState };
   } catch (err) {
-    // Reset cached handle so next call retries the connection
     plug = null;
     console.error(`[Kasa] Plug error: ${err.message}`);
     return { success: false, error: err.message };
   }
 }
 
-// ─── Bulb Controls ────────────────────────────────────────────────────────────
+async function setBulbState(lightState = {}) {
+  return queueBulbCommand(async () => {
+    try {
+      const device = await getBulb();
+      const nextState = { ...lightState };
+      for (const key of Object.keys(nextState)) {
+        if (nextState[key] === undefined) delete nextState[key];
+      }
 
-/**
- * Set the bulb to a specific light state.
- * All fields are optional — only pass what you want to change.
- *
- * @param {object} lightState
- * @param {number}  [lightState.on_off]        - 1 = on, 0 = off
- * @param {number}  [lightState.brightness]    - 0–100
- * @param {number}  [lightState.hue]           - 0–360 (color bulbs only)
- * @param {number}  [lightState.saturation]    - 0–100 (color bulbs only)
- * @param {number}  [lightState.color_temp]    - Kelvin, e.g. 2700 (warm) – 6500 (cool)
- * @param {number}  [lightState.transition_period] - ms for smooth transition
- */
-async function setBulbState(lightState) {
-  try {
-    const device = await getBulb();
-    await device.lighting.setLightState(lightState);
-    console.log(`[Kasa] Bulb state updated:`, lightState);
-    return { success: true, lightState };
-  } catch (err) {
-    bulb = null;
-    console.error(`[Kasa] Bulb error: ${err.message}`);
-    return { success: false, error: err.message };
+      if (nextState.brightness !== undefined) {
+        nextState.brightness = clampPercent(nextState.brightness);
+      }
+      if (nextState.hue !== undefined) {
+        nextState.hue = Math.round(clamp(nextState.hue, 0, 360));
+      }
+      if (nextState.saturation !== undefined) {
+        nextState.saturation = clampPercent(nextState.saturation);
+      }
+      if (nextState.color_temp !== undefined) {
+        nextState.color_temp = Math.round(clamp(nextState.color_temp, 2500, 9000));
+      }
+      if (nextState.transition_period !== undefined) {
+        nextState.transition_period = Math.round(clamp(nextState.transition_period, 0, 60_000));
+      }
+
+      await device.lighting.setLightState(nextState);
+      lastBulbState = { ...lastBulbState, ...nextState, updatedAt: new Date().toISOString() };
+      console.log('[Kasa] Bulb state updated:', nextState);
+      return { success: true, lightState: nextState };
+    } catch (err) {
+      bulb = null;
+      console.error(`[Kasa] Bulb error: ${err.message}`);
+      return { success: false, error: err.message };
+    }
+  });
+}
+
+async function setBulbPower(state, options = {}) {
+  return setBulbState({
+    on_off: state ? 1 : 0,
+    transition_period: options.transitionMs,
+  });
+}
+
+async function setBulbBrightness(brightness, options = {}) {
+  const percent = clampPercent(brightness);
+  const lightState = {
+    brightness: percent,
+    transition_period: options.transitionMs,
+  };
+
+  if (options.powerOffAtZero) {
+    lightState.on_off = percent > 0 ? 1 : 0;
+  } else if (options.turnOn !== false && percent > 0) {
+    lightState.on_off = 1;
   }
+
+  return setBulbState(lightState);
 }
 
-/**
- * Shorthand: turn the bulb on or off without changing other settings.
- * @param {boolean} state
- */
-async function setBulbPower(state) {
-  return setBulbState({ on_off: state ? 1 : 0 });
+async function setBulbBrightnessFromAxis(axisValue, options = {}) {
+  const brightness = axisToPercent(
+    axisValue,
+    options.axisMin ?? -1,
+    options.axisMax ?? 1
+  );
+  const result = await setBulbBrightness(brightness, options);
+  return { ...result, axisValue: Number(axisValue), brightness };
 }
 
-/**
- * Set bulb brightness only (keeps current color/temp).
- * @param {number} brightness - 0–100
- */
-async function setBulbBrightness(brightness) {
-  const clamped = Math.max(0, Math.min(100, Math.round(brightness)));
-  return setBulbState({ brightness: clamped });
+async function setBulbColor({ hue, saturation = 100, brightness, transitionMs } = {}) {
+  return setBulbState({
+    on_off: 1,
+    hue,
+    saturation,
+    brightness,
+    transition_period: transitionMs,
+  });
 }
 
-// ─── Focus Score Presets ──────────────────────────────────────────────────────
-// Convenience wrappers called by the focus score logic in server.js
+async function setBulbColorTemperature(colorTemp, options = {}) {
+  return setBulbState({
+    on_off: options.turnOn === false ? undefined : 1,
+    color_temp: colorTemp,
+    brightness: options.brightness,
+    transition_period: options.transitionMs,
+  });
+}
 
-/** Calm, warm light for focused work */
+async function applyPreset(name) {
+  const preset = BULB_PRESETS[String(name).toLowerCase()];
+  if (!preset) {
+    return { success: false, error: `Unknown preset: ${name}` };
+  }
+  return setBulbState(preset);
+}
+
 async function applyFocusedPreset() {
-  return setBulbState({
-    on_off: 1,
-    brightness: 80,
-    color_temp: 4000,   // Neutral white
-    transition_period: 1500,
-  });
+  return applyPreset('focused');
 }
 
-/** Dim, warm light to signal a break */
 async function applyBreakPreset() {
-  return setBulbState({
-    on_off: 1,
-    brightness: 30,
-    color_temp: 2700,   // Warm amber
-    transition_period: 2000,
-  });
+  return applyPreset('break');
 }
 
-/** Bright, cool light as a wake-up/refocus nudge */
 async function applyAlertPreset() {
-  return setBulbState({
-    on_off: 1,
-    brightness: 100,
-    color_temp: 6000,   // Cool daylight
-    transition_period: 500,
-  });
+  return applyPreset('alert');
 }
 
 module.exports = {
+  BULB_PRESETS,
+  axisToPercent,
+  resetConnections,
+  getDeviceStatus,
   setPlugPower,
   setBulbState,
   setBulbPower,
   setBulbBrightness,
+  setBulbBrightnessFromAxis,
+  setBulbColor,
+  setBulbColorTemperature,
+  applyPreset,
   applyFocusedPreset,
   applyBreakPreset,
   applyAlertPreset,
