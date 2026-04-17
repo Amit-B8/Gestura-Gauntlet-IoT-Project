@@ -32,3 +32,8 @@ GND ➔ GND (Pico Physical Pin 38) - Black Wire
 SCL ➔ GP5 (Pico Physical Pin 7) - White Wire
 
 SDA ➔ GP4 (Pico Physical Pin 6) - Yellow Wire
+
+
+Goals: use the pressure sensor as a selector for which device to use by cycling through as awell as going into and out of active mode (double Click)
+OR if we squeeze above a certian pressure it will go to active mode, lighter pressure will be passive mode
+
