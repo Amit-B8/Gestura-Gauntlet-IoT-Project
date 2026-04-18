@@ -9,6 +9,7 @@ from modules.gui import GauntletGUI
 from modules.mpu6050 import MPU6050
 from modules.button import GauntletButton
 from modules.datastore import StateStore
+from modules.fsr import FSR
  
 # Load env vars
 env = load_env()
@@ -80,7 +81,8 @@ async def network_task(gui, store):
                     "z": state.get("accel_z", 0.0),
                     "gx": state.get("gyro_x", 0.0),
                     "gy": state.get("gyro_y", 0.0),
-                    "gz": state.get("gyro_z", 0.0)
+                    "gz": state.get("gyro_z", 0.0),
+                    "pressure": state.get("pressure", 0.0)
                 }).encode("utf-8")
                 mqtt_client.publish(b"gauntlet/sensors", payload)
 
@@ -96,8 +98,12 @@ async def network_task(gui, store):
             # Yield control. 20ms = 50Hz publish rate for buttery smooth UI tracking
             await asyncio.sleep_ms(20)
  
-async def sensor_task(gui, mpu, store):
-    """Constantly reads the physical I2C motion sensor."""
+async def sensor_task(gui, mpu, fsr, store):
+    """Constantly reads the physical I2C motion sensor and FSR."""
+    
+    # Track the last time we printed to the terminal
+    last_print_time = time.ticks_ms()
+
     while True:
         try:
             # Check for calibration request
@@ -112,6 +118,7 @@ async def sensor_task(gui, mpu, store):
 
             accel_data = mpu.get_accel()
             gyro_data = mpu.get_gyro()
+            pressure = fsr.get_pressure_percentage()
             
             # Apply runtime re-zeroing for gyro (alpha=0.999 for slower drift)
             mpu.runtime_re_zero(gyro_data['x'], gyro_data['y'], gyro_data['z'], alpha=0.999)
@@ -122,8 +129,20 @@ async def sensor_task(gui, mpu, store):
                 accel_z=accel_data['z'],
                 gyro_x=gyro_data['x'],
                 gyro_y=gyro_data['y'],
-                gyro_z=gyro_data['z']
+                gyro_z=gyro_data['z'],
+                pressure=pressure
             )
+            
+            # Use ticks_diff to guarantee a print every 500ms
+            current_time = time.ticks_ms()
+            if time.ticks_diff(current_time, last_print_time) >= 500:
+                pressure = fsr.get_pressure_percentage()
+                res = fsr.read_resistance()
+                volt = fsr.read_voltage()
+                print(f"FSR -> V:{volt:.2f}V  R:{res:.0f}Ω  P:{pressure:.1f}%")
+                
+                last_print_time = current_time
+
         except Exception as e:
             print(f"Sensor Task Error: {e}")
             
@@ -141,6 +160,10 @@ async def main():
         if mpu_addr is None:
             raise Exception("MPU6050 not found on I2C (expected 0x68 or 0x69). Check wiring/AD0.")
         mpu = MPU6050(i2c, addr=mpu_addr)
+        
+        # Initialize FSR on GP26
+        fsr = FSR(26)
+
         global global_gui
         state_store = StateStore()
         global_gui = GauntletGUI(i2c, state_store)
@@ -162,7 +185,7 @@ async def main():
     print("Starting Parallel Tasks...")
     await asyncio.gather(
         global_gui.display_task(),
-        sensor_task(global_gui, mpu, state_store),
+        sensor_task(global_gui, mpu, fsr, state_store),
         network_task(global_gui, state_store),
         action_button.monitor(global_gui, mqtt_client, state_store),
         mode_button.monitor(global_gui, mqtt_client, state_store)
