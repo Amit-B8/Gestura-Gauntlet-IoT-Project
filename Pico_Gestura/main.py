@@ -118,6 +118,9 @@ async def sensor_task(gui, mpu, fsr, store):
 
             accel_data = mpu.get_accel()
             gyro_data = mpu.get_gyro()
+            
+            # Update FSR state and events
+            fsr.tick()
             pressure = fsr.get_pressure_percentage()
             
             # Apply runtime re-zeroing for gyro (alpha=0.999 for slower drift)
@@ -133,14 +136,16 @@ async def sensor_task(gui, mpu, fsr, store):
                 pressure=pressure
             )
             
-            # Use ticks_diff to guarantee a print every 500ms
             current_time = time.ticks_ms()
             if time.ticks_diff(current_time, last_print_time) >= 500:
-                pressure = fsr.get_pressure_percentage()
-                res = fsr.read_resistance()
-                volt = fsr.read_voltage()
-                print(f"FSR -> V:{volt:.2f}V  R:{res:.0f}Ω  P:{pressure:.1f}%")
+                raw_v = fsr.read_voltage()
+                smoothed_v = fsr.current_v_smoothed
+                state = fsr.get_state()
                 
+                # Debug info: Raw V, Smoothed V (used for logic), State, and %
+                # Threshold for STATE_FULL (2) is approx 0.340V
+                print(f"FSR -> Raw:{raw_v:.3f}V Smoothed:{smoothed_v:.3f}V STATE:{state} P:{pressure:.1f}%")
+
                 last_print_time = current_time
 
         except Exception as e:
@@ -167,6 +172,20 @@ async def main():
         global global_gui
         state_store = StateStore()
         global_gui = GauntletGUI(i2c, state_store)
+
+        # --- FSR Event Handlers ---
+        def on_fsr_double_press():
+            current_mode = state_store.get("mode")
+            new_mode = "ACTIVE" if current_mode == "PASSIVE" else "PASSIVE"
+            global_gui.update_state(mode=new_mode)
+            print(f"!!! FSR DOUBLE PRESS: Toggling mode to {new_mode} !!!")
+            if mqtt_client:
+                try:
+                    mqtt_client.publish(b"gauntlet/mode", new_mode.encode())
+                except Exception as e:
+                    print(f"MQTT FSR Publish Error: {e}")
+
+        fsr.subscribe(FSR.EVENT_HARD_DOUBLE_PRESS, on_fsr_double_press)
         
     except Exception as e:
         trigger_hardware_panic(str(e))
