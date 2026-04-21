@@ -8,6 +8,7 @@
 const { Client } = require('tplink-smarthome-api');
 
 const kasaClient = new Client();
+const KASA_TIMEOUT_MS = Math.max(1000, Number(process.env.KASA_TIMEOUT_MS || 4000));
 
 let plug = null;
 let bulb = null;
@@ -73,12 +74,30 @@ function queueBulbCommand(task) {
   return bulbQueue;
 }
 
+function withTimeout(label, operation, timeoutMs = KASA_TIMEOUT_MS) {
+  let timer = null;
+
+  return Promise.race([
+    Promise.resolve().then(operation),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
 async function getPlug() {
   if (plug) return plug;
   if (!process.env.PLUG_IP) throw new Error('PLUG_IP is not set in .env');
 
   console.log(`[Kasa] Connecting to plug at ${process.env.PLUG_IP}...`);
-  plug = await kasaClient.getDevice({ host: process.env.PLUG_IP });
+  plug = await withTimeout(
+    `Connecting to plug at ${process.env.PLUG_IP}`,
+    () => kasaClient.getDevice({ host: process.env.PLUG_IP })
+  );
   console.log(`[Kasa] Plug connected: "${plug.alias}"`);
   return plug;
 }
@@ -88,7 +107,10 @@ async function getBulb() {
   if (!process.env.BULB_IP) throw new Error('BULB_IP is not set in .env');
 
   console.log(`[Kasa] Connecting to bulb at ${process.env.BULB_IP}...`);
-  bulb = await kasaClient.getDevice({ host: process.env.BULB_IP });
+  bulb = await withTimeout(
+    `Connecting to bulb at ${process.env.BULB_IP}`,
+    () => kasaClient.getDevice({ host: process.env.BULB_IP })
+  );
   console.log(`[Kasa] Bulb connected: "${bulb.alias}"`);
   return bulb;
 }
@@ -109,9 +131,13 @@ async function getDeviceStatus() {
   try {
     if (process.env.PLUG_IP) {
       const device = await getPlug();
+      status.plug.connected = true;
       status.plug.alias = device.alias;
       if (typeof device.getPowerState === 'function') {
-        status.plug.power = await device.getPowerState();
+        status.plug.power = await withTimeout(
+          'Fetching plug power state',
+          () => device.getPowerState()
+        );
       }
     }
   } catch (err) {
@@ -122,9 +148,13 @@ async function getDeviceStatus() {
   try {
     if (process.env.BULB_IP) {
       const device = await getBulb();
+      status.bulb.connected = true;
       status.bulb.alias = device.alias;
       if (typeof device.getSysInfo === 'function') {
-        status.bulb.sysInfo = await device.getSysInfo();
+        status.bulb.sysInfo = await withTimeout(
+          'Fetching bulb sysInfo',
+          () => device.getSysInfo()
+        );
       }
     }
   } catch (err) {
@@ -139,7 +169,10 @@ async function setPlugPower(state) {
   try {
     const device = await getPlug();
     const powerState = Boolean(state);
-    await device.setPowerState(powerState);
+    await withTimeout(
+      `Setting plug power to ${powerState ? 'on' : 'off'}`,
+      () => device.setPowerState(powerState)
+    );
     console.log(`[Kasa] Plug turned ${powerState ? 'ON' : 'OFF'}`);
     return { success: true, state: powerState };
   } catch (err) {
@@ -168,13 +201,20 @@ async function setBulbState(lightState = {}) {
         nextState.saturation = clampPercent(nextState.saturation);
       }
       if (nextState.color_temp !== undefined) {
-        nextState.color_temp = Math.round(clamp(nextState.color_temp, 2500, 9000));
+        const requestedColorTemp = Number(nextState.color_temp);
+        nextState.color_temp =
+          requestedColorTemp === 0
+            ? 0
+            : Math.round(clamp(requestedColorTemp, 2500, 9000));
       }
       if (nextState.transition_period !== undefined) {
         nextState.transition_period = Math.round(clamp(nextState.transition_period, 0, 60_000));
       }
 
-      await device.lighting.setLightState(nextState);
+      await withTimeout(
+        `Applying bulb state to ${process.env.BULB_IP}`,
+        () => device.lighting.setLightState(nextState)
+      );
       lastBulbState = { ...lastBulbState, ...nextState, updatedAt: new Date().toISOString() };
       console.log('[Kasa] Bulb state updated:', nextState);
       return { success: true, lightState: nextState };
@@ -224,6 +264,7 @@ async function setBulbColor({ hue, saturation = 100, brightness, transitionMs } 
     on_off: 1,
     hue,
     saturation,
+    color_temp: 0,
     brightness,
     transition_period: transitionMs,
   });

@@ -76,21 +76,14 @@ async def network_task(gui, store):
                 # focus scoring, and Kasa light control.
                 state = store.snapshot()
                 payload = ujson.dumps({
-<<<<<<< HEAD
-=======
                     "mode": state.get("mode", "UNKNOWN"),
->>>>>>> kasa_backend
                     "x": state.get("accel_x", 0.0),
                     "y": state.get("accel_y", 0.0),
                     "z": state.get("accel_z", 0.0),
                     "gx": state.get("gyro_x", 0.0),
                     "gy": state.get("gyro_y", 0.0),
-<<<<<<< HEAD
                     "gz": state.get("gyro_z", 0.0),
                     "pressure": state.get("pressure", 0.0)
-=======
-                    "gz": state.get("gyro_z", 0.0)
->>>>>>> kasa_backend
                 }).encode("utf-8")
                 mqtt_client.publish(b"gauntlet/sensors", payload)
 
@@ -179,7 +172,12 @@ async def main():
 
         global global_gui
         state_store = StateStore()
-        global_gui = GauntletGUI(i2c, state_store)
+        oled_present = 0x3C in devices or 0x3D in devices
+        if oled_present:
+            print("OLED detected on I2C bus.")
+        else:
+            print("OLED not detected, running headless.")
+        global_gui = GauntletGUI(i2c, state_store, enabled=oled_present)
 
         # --- FSR Event Handlers ---
         def on_fsr_double_press():
@@ -210,13 +208,15 @@ async def main():
     time.sleep(1)
  
     print("Starting Parallel Tasks...")
-    await asyncio.gather(
-        global_gui.display_task(),
+    tasks = [
         sensor_task(global_gui, mpu, fsr, state_store),
         network_task(global_gui, state_store),
         action_button.monitor(global_gui, mqtt_client, state_store),
         mode_button.monitor(global_gui, mqtt_client, state_store)
-    )
+    ]
+    if global_gui.enabled:
+        tasks.insert(0, global_gui.display_task())
+    await asyncio.gather(*tasks)
  
 if __name__ == "__main__":
     try:

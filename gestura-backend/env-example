@@ -10,6 +10,7 @@ MQTT_BROKER_PORT=1883
 # Find these in the Kasa mobile app under Device Info
 PLUG_IP=192.168.1.XXX
 BULB_IP=192.168.1.XXX
+KASA_TIMEOUT_MS=4000
 
 # Live X-axis to Kasa bulb brightness control
 # Default maps accelerometer x=-1 to 0% and x=+1 to 100% while mode is active.
@@ -25,5 +26,13 @@ GYRO_BULB_SMOOTHING=0.6
 GYRO_BULB_TRANSITION_MS=80
 GYRO_BULB_POWER_OFF_AT_ZERO=true
 
-# Set false if you want live gyro bulb control without focus presets fighting it.
-FOCUS_KASA_ACTIONS_ENABLED=true
+# Passive mode bulb behavior
+# Red = still, Green = moving
+PASSIVE_MOTION_WINDOW_SIZE=8
+PASSIVE_MOTION_MOVING_THRESHOLD=0.08
+PASSIVE_MOTION_STILL_THRESHOLD=0.03
+PASSIVE_MOTION_BRIGHTNESS=100
+PASSIVE_MOTION_TRANSITION_MS=0
+PASSIVE_DEBUG_LOG_ENABLED=true
+PASSIVE_DEBUG_LOG_INTERVAL_MS=500
+PASSIVE_SENSOR_STALE_MS=2000
