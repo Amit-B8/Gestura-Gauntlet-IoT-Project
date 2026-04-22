@@ -11,9 +11,11 @@ import {
   Hand,
   Lightbulb,
   ListChecks,
+  Play,
   Plug,
   Plus,
   RefreshCw,
+  Trash2,
   Server,
   Settings,
   SlidersHorizontal,
@@ -22,7 +24,6 @@ import {
 import {
   ActionMapping,
   BackendManagedDevice,
-  capabilityLibrary,
   defaultDevices,
   deviceKinds,
   DeviceCapability,
@@ -36,7 +37,6 @@ import {
 } from "@/lib/gestura-config";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -48,6 +48,14 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 
+type DeviceActionResult = {
+  ok: boolean;
+  deviceId: string;
+  capabilityId: string;
+  appliedValue?: string | number | boolean | null;
+  message?: string;
+};
+
 export default function ConfigurationPage() {
   const [devices, setDevices] = useState<DeviceDefinition[]>(defaultDevices);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
@@ -55,16 +63,33 @@ export default function ConfigurationPage() {
   const [managers, setManagers] = useState<DeviceManagerInfo[]>([]);
   const [backendUrl, setBackendUrl] = useState("http://localhost:3001");
   const [kasaName, setKasaName] = useState("Kasa Lab");
-  const [externalName, setExternalName] = useState("Simulator Lab");
-  const [externalBaseUrl, setExternalBaseUrl] = useState("http://localhost:3101");
+  const [externalName, setExternalName] = useState("");
+  const [externalBaseUrl, setExternalBaseUrl] = useState("");
   const [externalAuthToken, setExternalAuthToken] = useState("");
   const [managerStatus, setManagerStatus] = useState("No managers loaded.");
   const [scanningKasa, setScanningKasa] = useState(false);
+  const [syncingExternalManagers, setSyncingExternalManagers] = useState<Set<string>>(new Set());
+  const [removingExternalManagers, setRemovingExternalManagers] = useState<Set<string>>(new Set());
+  const [testCapabilityId, setTestCapabilityId] = useState<string>("");
+  const [testValue, setTestValue] = useState<string>("");
+  const [testStatus, setTestStatus] = useState("Select a device function to test.");
+  const [testingFunction, setTestingFunction] = useState(false);
   const [clockTick, setClockTick] = useState(Date.now());
 
   const selectedDevice = devices.find((device) => device.id === selectedDeviceId) ?? null;
+  const testCapability = useMemo(
+    () =>
+      selectedDevice?.capabilities.find((capability) => capability.id === testCapabilityId) ??
+      selectedDevice?.capabilities[0] ??
+      null,
+    [selectedDevice, testCapabilityId],
+  );
   const kasaManager = useMemo(
     () => managers.find((manager) => manager.kind === "kasa" || manager.id.includes("kasa")) ?? null,
+    [managers],
+  );
+  const externalManagers = useMemo(
+    () => managers.filter((manager) => manager.integrationType === "external"),
     [managers],
   );
   const kasaIsScanning = scanningKasa || getManagerBooleanMetadata(kasaManager, "isScanning");
@@ -101,24 +126,6 @@ export default function ConfigurationPage() {
           : device,
       ),
     );
-  };
-
-  const toggleCapability = (capability: DeviceCapability, enabled: boolean) => {
-    if (!selectedDevice) return;
-    const nextCapabilities = enabled
-      ? [...selectedDevice.capabilities, capability]
-      : selectedDevice.capabilities.filter((item) => item.id !== capability.id);
-
-    updateSelectedDevice({ capabilities: nextCapabilities });
-
-    if (!enabled) {
-      setMappings((current) =>
-        current.filter(
-          (mapping) =>
-            !(mapping.targetDevice === selectedDevice.id && mapping.targetAction === capability.id),
-        ),
-      );
-    }
   };
 
   const updateCapabilityMapping = <Key extends keyof ActionMapping>(
@@ -232,12 +239,13 @@ export default function ConfigurationPage() {
 
   const addExternalManager = async () => {
     try {
+      const normalizedBaseUrl = normalizeExternalBaseUrl(externalBaseUrl);
       const response = await fetch(`${backendUrl}/api/managers/external`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: externalName,
-          baseUrl: externalBaseUrl,
+          baseUrl: normalizedBaseUrl,
           authToken: externalAuthToken || undefined,
         }),
       });
@@ -248,15 +256,115 @@ export default function ConfigurationPage() {
       }
 
       setManagerStatus(`External manager added. Imported ${payload.deviceCount ?? 0} devices.`);
+      setExternalName("");
+      setExternalBaseUrl("");
+      setExternalAuthToken("");
       await refreshManagersAndDevices();
     } catch (error) {
       setManagerStatus(error instanceof Error ? error.message : "Failed to add external manager.");
     }
   };
 
+  const reloadExternalManager = async (manager: DeviceManagerInfo) => {
+    const managerId = manager.id;
+    setSyncingExternalManagers((current) => new Set(current).add(managerId));
+    setManagerStatus(`${manager.kind === "simulator" ? "Scanning" : "Reloading"} ${managerId}.`);
+
+    try {
+      const endpoint = manager.kind === "simulator" ? "discover" : "sync";
+      const response = await fetch(`${backendUrl}/api/managers/${encodeURIComponent(managerId)}/${endpoint}`, {
+        method: "POST",
+      });
+
+      if (!response.ok) throw new Error(`External manager refresh failed (${response.status})`);
+      setManagerStatus(`External manager ${managerId} refreshed.`);
+      await refreshManagersAndDevices();
+    } catch (error) {
+      setManagerStatus(error instanceof Error ? error.message : "Failed to reload external manager.");
+    } finally {
+      setSyncingExternalManagers((current) => {
+        const next = new Set(current);
+        next.delete(managerId);
+        return next;
+      });
+    }
+  };
+
+  const removeExternalManager = async (managerId: string) => {
+    setRemovingExternalManagers((current) => new Set(current).add(managerId));
+    setManagerStatus(`Removing ${managerId}.`);
+
+    try {
+      const response = await fetch(`${backendUrl}/api/managers/${encodeURIComponent(managerId)}`, {
+        method: "DELETE",
+      });
+
+      if (!response.ok) throw new Error(`External manager remove failed (${response.status})`);
+      setManagerStatus(`External manager ${managerId} removed.`);
+      await refreshManagersAndDevices();
+    } catch (error) {
+      setManagerStatus(error instanceof Error ? error.message : "Failed to remove external manager.");
+    } finally {
+      setRemovingExternalManagers((current) => {
+        const next = new Set(current);
+        next.delete(managerId);
+        return next;
+      });
+    }
+  };
+
+  const runTestFunction = async () => {
+    if (!selectedDevice || !testCapability) return;
+
+    setTestingFunction(true);
+    setTestStatus(`Running ${selectedDevice.name}.${testCapability.id}.`);
+
+    try {
+      const response = await fetch(
+        `${backendUrl}/api/devices/${encodeURIComponent(selectedDevice.id)}/actions/${encodeURIComponent(testCapability.id)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            commandType: "set",
+            value: coerceTestValue(testCapability, testValue),
+          }),
+        },
+      );
+      const result = (await response.json()) as DeviceActionResult;
+
+      if (!response.ok || !result.ok) {
+        throw new Error(result.message || `Action failed (${response.status})`);
+      }
+
+      setTestStatus(
+        `Applied ${testCapability.id}: ${formatTestValue(result.appliedValue)}`,
+      );
+    } catch (error) {
+      setTestStatus(error instanceof Error ? error.message : "Test function failed.");
+    } finally {
+      setTestingFunction(false);
+    }
+  };
+
   useEffect(() => {
     void refreshManagersAndDevices();
   }, []);
+
+  useEffect(() => {
+    const nextCapability = selectedDevice?.capabilities[0] ?? null;
+    setTestCapabilityId(nextCapability?.id ?? "");
+    setTestValue(nextCapability ? defaultTestValue(nextCapability) : "");
+    setTestStatus(
+      nextCapability ? "Ready to test an allowed device function." : "Select a device function to test.",
+    );
+  }, [selectedDevice?.id]);
+
+  useEffect(() => {
+    if (testCapability) {
+      setTestValue(defaultTestValue(testCapability));
+    }
+  }, [testCapability?.id]);
 
   useEffect(() => {
     const interval = setInterval(() => void refreshManagersAndDevices(), 60_000);
@@ -387,19 +495,24 @@ export default function ConfigurationPage() {
             <div className="mb-5 flex items-center gap-2">
               <Server className="size-5 text-chart-2" />
               <div>
-                <h2 className="font-semibold">External Manager</h2>
+                <h2 className="font-semibold">External Managers</h2>
                 <p className="text-sm text-muted-foreground">Backend validates the manager API contract.</p>
               </div>
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <Field label="Display name">
-                <Input value={externalName} onChange={(event) => setExternalName(event.target.value)} />
+                <Input
+                  value={externalName}
+                  onChange={(event) => setExternalName(event.target.value)}
+                  placeholder="Lab simulator"
+                />
               </Field>
               <Field label="Base URL">
                 <Input
                   value={externalBaseUrl}
                   onChange={(event) => setExternalBaseUrl(event.target.value)}
                   className="font-mono text-xs"
+                  placeholder="http://192.168.1.42:3101"
                 />
               </Field>
               <Field label="Auth token">
@@ -414,10 +527,64 @@ export default function ConfigurationPage() {
                   <Plus className="size-4" />
                   Add
                 </Button>
-                <Button onClick={refreshManagersAndDevices} variant="outline" size="icon" aria-label="Refresh managers">
-                  <RefreshCw className="size-4" />
-                </Button>
               </div>
+            </div>
+            <div className="mt-5 grid gap-3">
+              {externalManagers.length === 0 && (
+                <div className="rounded-md border border-dashed border-border bg-background p-4 text-sm text-muted-foreground">
+                  No external managers registered.
+                </div>
+              )}
+              {externalManagers.map((manager) => {
+                const isSyncing = syncingExternalManagers.has(manager.id);
+                const isRemoving = removingExternalManagers.has(manager.id);
+                const refreshLabel = manager.kind === "simulator" ? "Scan now" : "Reload";
+
+                return (
+                  <div
+                    key={manager.id}
+                    className="rounded-md border border-border bg-background p-4"
+                  >
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h3 className="font-semibold">{manager.name}</h3>
+                          <Badge className="rounded-full bg-chart-2 text-white">
+                            {manager.kind}
+                          </Badge>
+                          <Badge variant={manager.online ? "default" : "outline"}>
+                            {manager.online ? "Online" : "Offline"}
+                          </Badge>
+                        </div>
+                        <p className="mt-1 truncate font-mono text-xs text-muted-foreground">
+                          {manager.id}
+                          {manager.baseUrl ? ` · ${manager.baseUrl}` : ""}
+                        </p>
+                      </div>
+                      <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+                        <Button
+                          onClick={() => void reloadExternalManager(manager)}
+                          variant="outline"
+                          className="w-full sm:w-auto"
+                          disabled={isSyncing || isRemoving}
+                        >
+                          <RefreshCw className={`size-4 ${isSyncing ? "animate-spin" : ""}`} />
+                          {refreshLabel}
+                        </Button>
+                        <Button
+                          onClick={() => void removeExternalManager(manager.id)}
+                          variant="outline"
+                          className="w-full sm:w-auto"
+                          disabled={isRemoving || isSyncing}
+                        >
+                          <Trash2 className="size-4" />
+                          Remove
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
             <div className="mt-4 rounded-md border border-border bg-background p-3 text-sm text-muted-foreground">
               {managerStatus}
@@ -507,7 +674,7 @@ export default function ConfigurationPage() {
                     </SelectContent>
                   </Select>
                 </Field>
-                <Field label="Enabled actions">
+                <Field label="Supported actions">
                   <div className="text-sm text-muted-foreground">
                     {selectedDevice.capabilities.length} supported
                   </div>
@@ -521,34 +688,23 @@ export default function ConfigurationPage() {
               </div>
 
               <div className="mt-6 grid gap-2">
-                {capabilityLibrary.map((capability) => {
-                  const enabled = selectedDevice.capabilities.some((item) => item.id === capability.id);
-                  return (
-                    <label
-                      key={capability.id}
-                      className="flex items-center justify-between gap-4 rounded-md border border-border bg-background p-3"
-                    >
-                      <div className="flex min-w-0 items-center gap-3">
-                        <Checkbox
-                          checked={enabled}
-                          onCheckedChange={(checked) => toggleCapability(capability, checked === true)}
-                        />
-                        <div className="min-w-0">
-                          <div className="truncate text-sm font-medium">{capability.label}</div>
-                          <div className="truncate text-xs text-muted-foreground">
-                            {capability.type}
-                            {capability.min !== undefined && capability.max !== undefined
-                              ? ` ${capability.min}..${capability.max}`
-                              : ""}
-                          </div>
-                        </div>
+                {selectedDevice.capabilities.map((capability) => (
+                  <div
+                    key={capability.id}
+                    className="flex items-center justify-between gap-4 rounded-md border border-border bg-background p-3"
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium">{capability.label}</div>
+                      <div className="truncate text-xs text-muted-foreground">
+                        {capability.type}
+                        {capability.min !== undefined && capability.max !== undefined
+                          ? ` ${capability.min}..${capability.max}`
+                          : ""}
                       </div>
-                      <Badge variant={enabled ? "default" : "outline"}>
-                        {enabled ? "Enabled" : "Off"}
-                      </Badge>
-                    </label>
-                  );
-                })}
+                    </div>
+                    <Badge variant="default">Supported</Badge>
+                  </div>
+                ))}
               </div>
 
               <div className="mt-8">
@@ -582,6 +738,18 @@ export default function ConfigurationPage() {
                     );
                   })}
                 </div>
+
+                <TestFunctionPanel
+                  device={selectedDevice}
+                  capability={testCapability}
+                  capabilityId={testCapabilityId}
+                  value={testValue}
+                  status={testStatus}
+                  isRunning={testingFunction}
+                  onCapabilityChange={setTestCapabilityId}
+                  onValueChange={setTestValue}
+                  onRun={() => void runTestFunction()}
+                />
               </div>
             </div>
           </section>
@@ -659,6 +827,9 @@ function FunctionMappingCard({
   mapping: ActionMapping;
   onUpdate: <Key extends keyof ActionMapping>(key: Key, value: ActionMapping[Key]) => void;
 }) {
+  const modeOptions = mappingModesForCapability(capability);
+  const selectedMode = modeOptions.includes(mapping.mode) ? mapping.mode : modeOptions[0];
+
   return (
     <details className="group rounded-md border border-border bg-background p-4">
       <summary className="flex cursor-pointer list-none flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
@@ -696,18 +867,18 @@ function FunctionMappingCard({
 
         <Field label={`${capability.id} mode`}>
           <Select
-            value={mapping.mode}
+            value={selectedMode}
             onValueChange={(value) => onUpdate("mode", value as MappingMode)}
           >
             <SelectTrigger className="w-full">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="toggle">toggle</SelectItem>
-              <SelectItem value="continuous_absolute">continuous_absolute</SelectItem>
-              <SelectItem value="continuous_delta">continuous_delta</SelectItem>
-              <SelectItem value="step">step</SelectItem>
-              <SelectItem value="scene">scene</SelectItem>
+              {modeOptions.map((mode) => (
+                <SelectItem key={mode} value={mode}>
+                  {mode}
+                </SelectItem>
+              ))}
             </SelectContent>
           </Select>
         </Field>
@@ -741,10 +912,166 @@ function FunctionMappingCard({
   );
 }
 
+function TestFunctionPanel({
+  device,
+  capability,
+  capabilityId,
+  value,
+  status,
+  isRunning,
+  onCapabilityChange,
+  onValueChange,
+  onRun,
+}: {
+  device: DeviceDefinition;
+  capability: DeviceCapability | null;
+  capabilityId: string;
+  value: string;
+  status: string;
+  isRunning: boolean;
+  onCapabilityChange: (capabilityId: string) => void;
+  onValueChange: (value: string) => void;
+  onRun: () => void;
+}) {
+  return (
+    <div className="mt-5 rounded-md border border-border bg-background p-4">
+      <div className="mb-4 flex items-center gap-2">
+        <Play className="size-4 text-primary" />
+        <div>
+          <h3 className="font-semibold">Test Function</h3>
+          <p className="text-xs text-muted-foreground">
+            Executes through the backend action router for {device.name}.
+          </p>
+        </div>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-[1fr_1fr_auto]">
+        <Field label="Function">
+          <Select
+            value={capabilityId}
+            onValueChange={onCapabilityChange}
+            disabled={device.capabilities.length === 0 || isRunning}
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue placeholder="Select function" />
+            </SelectTrigger>
+            <SelectContent>
+              {device.capabilities.map((item) => (
+                <SelectItem key={item.id} value={item.id}>
+                  {item.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+
+        <TestValueField
+          capability={capability}
+          value={value}
+          disabled={!capability || isRunning}
+          onChange={onValueChange}
+        />
+
+        <div className="flex items-end">
+          <Button
+            onClick={onRun}
+            disabled={!capability || isRunning}
+            className="w-full md:w-auto"
+          >
+            <Play className="size-4" />
+            {isRunning ? "Running" : "Run"}
+          </Button>
+        </div>
+      </div>
+
+      <div className="mt-4 rounded-md border border-border bg-card p-3 font-mono text-xs text-muted-foreground">
+        {status}
+      </div>
+    </div>
+  );
+}
+
+function TestValueField({
+  capability,
+  value,
+  disabled,
+  onChange,
+}: {
+  capability: DeviceCapability | null;
+  value: string;
+  disabled: boolean;
+  onChange: (value: string) => void;
+}) {
+  if (capability?.type === "toggle") {
+    return (
+      <Field label="Value">
+        <Select value={value} onValueChange={onChange} disabled={disabled}>
+          <SelectTrigger className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="true">On</SelectItem>
+            <SelectItem value="false">Off</SelectItem>
+          </SelectContent>
+        </Select>
+      </Field>
+    );
+  }
+
+  if (capability?.type === "discrete" && capability.options?.length) {
+    return (
+      <Field label="Value">
+        <Select value={value} onValueChange={onChange} disabled={disabled}>
+          <SelectTrigger className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {capability.options.map((option) => (
+              <SelectItem key={option} value={option}>
+                {option}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </Field>
+    );
+  }
+
+  if (capability?.type === "color") {
+    return (
+      <Field label="Value">
+        <Input
+          type="color"
+          value={value || "#ffffff"}
+          onChange={(event) => onChange(event.target.value)}
+          disabled={disabled}
+          className="h-10"
+        />
+      </Field>
+    );
+  }
+
+  return (
+    <Field label="Value">
+      <Input
+        type={capability?.type === "range" ? "number" : "text"}
+        value={value}
+        min={capability?.min}
+        max={capability?.max}
+        step={capability?.step}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    </Field>
+  );
+}
+
 function createCapabilityMapping(deviceId: string, capability: DeviceCapability): ActionMapping {
+  const [mode] = mappingModesForCapability(capability);
+
   return {
     source: capability.type === "toggle" ? "bottom_tap" : "glove.roll",
-    mode: capability.type === "toggle" ? "toggle" : "continuous_absolute",
+    mode,
     targetDevice: deviceId,
     targetAction: capability.id,
     min: capability.min ?? 0,
@@ -755,6 +1082,38 @@ function createCapabilityMapping(deviceId: string, capability: DeviceCapability)
     offset: 0,
     smoothing: capability.type === "toggle" ? 0 : 0.25,
   };
+}
+
+function mappingModesForCapability(capability: DeviceCapability): MappingMode[] {
+  if (capability.type === "toggle") return ["toggle"];
+  if (capability.type === "discrete") return ["scene"];
+  if (capability.type === "range") return ["continuous_absolute", "continuous_delta", "step"];
+  return ["continuous_absolute"];
+}
+
+function defaultTestValue(capability: DeviceCapability) {
+  if (capability.type === "toggle") return "true";
+  if (capability.type === "color") return "#ffffff";
+  if (capability.type === "discrete") return capability.options?.[0] ?? "";
+
+  const min = capability.min ?? 0;
+  const max = capability.max ?? 100;
+  return String(Math.round((min + max) / 2));
+}
+
+function coerceTestValue(capability: DeviceCapability, value: string) {
+  if (capability.type === "toggle") return value === "true";
+  if (capability.type === "range") {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return capability.min ?? 0;
+    return Math.max(capability.min ?? numeric, Math.min(capability.max ?? numeric, numeric));
+  }
+  return value;
+}
+
+function formatTestValue(value: DeviceActionResult["appliedValue"]) {
+  if (value === null || value === undefined) return "null";
+  return String(value);
 }
 
 function toGloveMappingContract(mapping: ActionMapping): GloveMappingContract {
@@ -875,4 +1234,10 @@ function formatLastScanned(
   if (elapsedMinutes < 1) return "now";
   if (elapsedMinutes === 1) return "1 min ago";
   return `${elapsedMinutes} mins ago`;
+}
+
+function normalizeExternalBaseUrl(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return trimmed;
+  return /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
 }
