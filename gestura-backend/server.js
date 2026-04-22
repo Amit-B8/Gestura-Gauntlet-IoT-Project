@@ -195,6 +195,7 @@ function normalizeSensorPayload(data = {}) {
     gx: toFiniteNumber(data.gx ?? data.gyro_x),
     gy: toFiniteNumber(data.gy ?? data.gyro_y),
     gz: toFiniteNumber(data.gz ?? data.gyro_z),
+    pressure: toFiniteNumber(data.pressure, 0),
   };
 }
 
@@ -660,6 +661,12 @@ async function sendGyroBulbBrightness(update) {
 
 async function handleGyroBulbControl(sensor) {
   if (!isGyroBulbControlActive()) return;
+
+  // Only allow gyro control in active mode if the user is "holding down" (pressure > 15%)
+  const pressure = toFiniteNumber(sensor.pressure, 0);
+  if (currentMode === 'active' && pressure <= 15) {
+    return;
+  }
 
   const rawAxis = toFiniteNumber(sensor[gyroBulbControl.axis], NaN);
   if (!Number.isFinite(rawAxis)) return;
