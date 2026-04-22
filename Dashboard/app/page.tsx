@@ -9,9 +9,7 @@ import {
   BarChart3,
   Clock3,
   Cpu,
-  Gauge,
   Hand,
-  Lightbulb,
   Network,
   RefreshCw,
   Settings,
@@ -46,16 +44,6 @@ interface SensorData {
   gz: number;
 }
 
-interface GyroBulbControl {
-  enabled: boolean;
-  active: boolean;
-  axis: string;
-  smoothing: number;
-  throttleMs: number;
-  lastBrightness: number | null;
-  pendingBrightness: number | null;
-}
-
 const emptySensorData: SensorData = { x: 0, y: 0, z: 0, gx: 0, gy: 0, gz: 0 };
 
 let socket: Socket | null = null;
@@ -66,7 +54,8 @@ export default function Dashboard() {
   const [activeMode, setActiveMode] = useState<GloveMode>("passive");
   const [selectedDevice] = useState("desk_lamp");
   const [selectedAction] = useState("brightness");
-  const [focusScore, setFocusScore] = useState(75);
+  const [managerCount, setManagerCount] = useState(0);
+  const [deviceCount, setDeviceCount] = useState(0);
   const [sensorData, setSensorData] = useState<SensorData>(emptySensorData);
   const [sensorStatus, setSensorStatus] = useState<SensorStatus>({
     latest: null,
@@ -74,7 +63,6 @@ export default function Dashboard() {
     lastUpdatedAt: null,
     source: null,
   });
-  const [gyroBulbControl, setGyroBulbControl] = useState<GyroBulbControl | null>(null);
   const [showSensorData, setShowSensorData] = useState(false);
   const [isSimulating, setIsSimulating] = useState(false);
   const [statusLatencyMs, setStatusLatencyMs] = useState<number | null>(null);
@@ -99,29 +87,13 @@ export default function Dashboard() {
       }
     });
 
-    socket.on("focusScore", (score: number) => {
-      setFocusScore(Math.round(score));
-    });
-
     socket.on("sensorStatus", (status: SensorStatus) => {
       setSensorStatus(status);
       if (status.latest) setSensorData(normalizeSensorData(status.latest));
     });
 
-    socket.on("gyroBulbControl", (control: GyroBulbControl) => {
-      setGyroBulbControl(control);
-    });
-
-    socket.on("gyroBulbUpdate", (update: { brightness?: number }) => {
-      setGyroBulbControl((current) =>
-        current
-          ? {
-              ...current,
-              lastBrightness: update.brightness ?? current.lastBrightness,
-              pendingBrightness: null,
-            }
-          : current,
-      );
+    socket.on("managers", (managers: unknown[]) => {
+      setManagerCount(Array.isArray(managers) ? managers.length : 0);
     });
 
     socket.on("sensorData", (data: Partial<SensorData> & { timestamp?: string }) => {
@@ -172,10 +144,10 @@ export default function Dashboard() {
       setStatusLatencyMs(Math.round(performance.now() - startedAt));
       setLastStatusSync(new Date().toLocaleTimeString());
       if (data.mode === "active" || data.mode === "passive") setActiveMode(data.mode);
-      if (typeof data.focusScore === "number") setFocusScore(data.focusScore);
       if (data.sensor) setSensorStatus(data.sensor);
       if (data.sensor?.latest) setSensorData(normalizeSensorData(data.sensor.latest));
-      if (data.gyroBulbControl) setGyroBulbControl(data.gyroBulbControl);
+      if (Array.isArray(data.managers)) setManagerCount(data.managers.length);
+      if (typeof data.deviceCount === "number") setDeviceCount(data.deviceCount);
     } catch {
       setStatusLatencyMs(null);
       setNetworkStatus((current) => (current === "connected" ? current : "disconnected"));
@@ -218,9 +190,9 @@ export default function Dashboard() {
       icon: Signal,
     },
     {
-      label: "Gyro control",
-      value: gyroBulbControl?.active ? "Active" : gyroBulbControl?.enabled ? "Armed" : "Disabled",
-      icon: Lightbulb,
+      label: "Imported devices",
+      value: deviceCount.toLocaleString(),
+      icon: Cpu,
     },
   ];
 
@@ -292,7 +264,7 @@ export default function Dashboard() {
             </div>
 
             <div className="mt-8 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              <MetricTile label="Focus score" value={`${focusScore}%`} icon={Gauge} tone={focusScore >= 70 ? "good" : focusScore >= 45 ? "warn" : "bad"} />
+              <MetricTile label="Device managers" value={managerCount.toLocaleString()} icon={BarChart3} />
               <MetricTile label="Mode topic" value="gauntlet/mode" icon={Network} />
               <MetricTile label="Sensor topic" value="gauntlet/sensors" icon={Cpu} />
               <MetricTile label="Last sync" value={lastStatusSync ?? "Pending"} icon={RefreshCw} />

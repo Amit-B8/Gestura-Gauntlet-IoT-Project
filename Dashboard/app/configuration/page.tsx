@@ -59,12 +59,16 @@ export default function ConfigurationPage() {
   const [externalBaseUrl, setExternalBaseUrl] = useState("http://localhost:3101");
   const [externalAuthToken, setExternalAuthToken] = useState("");
   const [managerStatus, setManagerStatus] = useState("No managers loaded.");
+  const [scanningKasa, setScanningKasa] = useState(false);
+  const [clockTick, setClockTick] = useState(Date.now());
 
   const selectedDevice = devices.find((device) => device.id === selectedDeviceId) ?? null;
   const kasaManager = useMemo(
     () => managers.find((manager) => manager.kind === "kasa" || manager.id.includes("kasa")) ?? null,
     [managers],
   );
+  const kasaIsScanning = scanningKasa || getManagerBooleanMetadata(kasaManager, "isScanning");
+  const kasaLastScanned = formatLastScanned(kasaManager, clockTick, kasaIsScanning);
   const selectedDeviceMappings = useMemo(
     () =>
       selectedDevice?.capabilities.map(
@@ -206,6 +210,26 @@ export default function ConfigurationPage() {
     }
   };
 
+  const scanKasaManager = async () => {
+    if (!kasaManager) return;
+
+    setScanningKasa(true);
+    setManagerStatus("Scanning Kasa devices now.");
+    try {
+      const response = await fetch(`${backendUrl}/api/managers/${kasaManager.id}/discover`, {
+        method: "POST",
+      });
+
+      if (!response.ok) throw new Error(`Kasa scan failed (${response.status})`);
+      setManagerStatus("Kasa scan complete.");
+      await refreshManagersAndDevices();
+    } catch (error) {
+      setManagerStatus(error instanceof Error ? error.message : "Failed to scan Kasa devices.");
+    } finally {
+      setScanningKasa(false);
+    }
+  };
+
   const addExternalManager = async () => {
     try {
       const response = await fetch(`${backendUrl}/api/managers/external`, {
@@ -232,6 +256,16 @@ export default function ConfigurationPage() {
 
   useEffect(() => {
     void refreshManagersAndDevices();
+  }, []);
+
+  useEffect(() => {
+    const interval = setInterval(() => void refreshManagersAndDevices(), 60_000);
+    return () => clearInterval(interval);
+  }, [backendUrl]);
+
+  useEffect(() => {
+    const interval = setInterval(() => setClockTick(Date.now()), 30_000);
+    return () => clearInterval(interval);
   }, []);
 
   return (
@@ -298,23 +332,36 @@ export default function ConfigurationPage() {
                   </div>
                 </div>
 
-                <Button
-                  onClick={kasaManager ? disableKasaManager : enableKasaManager}
-                  variant={kasaManager ? "outline" : "default"}
-                  className="w-full sm:w-auto"
-                >
-                  {kasaManager ? (
-                    "Disable"
-                  ) : (
-                    <>
-                      <Plus className="size-4" />
-                      Enable
-                    </>
+                <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+                  {kasaManager && (
+                    <Button
+                      onClick={scanKasaManager}
+                      variant="outline"
+                      className="w-full sm:w-auto"
+                      disabled={kasaIsScanning}
+                    >
+                      <RefreshCw className={`size-4 ${kasaIsScanning ? "animate-spin" : ""}`} />
+                      Scan now
+                    </Button>
                   )}
-                </Button>
+                  <Button
+                    onClick={kasaManager ? disableKasaManager : enableKasaManager}
+                    variant={kasaManager ? "outline" : "default"}
+                    className="w-full sm:w-auto"
+                  >
+                    {kasaManager ? (
+                      "Disable"
+                    ) : (
+                      <>
+                        <Plus className="size-4" />
+                        Enable
+                      </>
+                    )}
+                  </Button>
+                </div>
               </div>
 
-              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <div className="mt-4 grid gap-3 sm:grid-cols-3">
                 <Field label="Manager name">
                   <Input
                     value={kasaManager?.name ?? kasaName}
@@ -324,10 +371,13 @@ export default function ConfigurationPage() {
                 </Field>
                 <Field label="Manager ID">
                   <Input
-                    value={kasaManager?.id ?? "mgr-kasa"}
+                    value={kasaManager?.id ?? "kasa-main"}
                     disabled
                     className="font-mono text-xs"
                   />
+                </Field>
+                <Field label="Last scanned">
+                  <Input value={kasaLastScanned} disabled />
                 </Field>
               </div>
             </div>
@@ -789,4 +839,40 @@ function managerColorClass(managerId: string) {
   if (managerId.includes("kasa")) return "bg-primary";
   if (managerId.includes("sim")) return "bg-chart-2";
   return "bg-chart-4";
+}
+
+function getManagerBooleanMetadata(
+  manager: DeviceManagerInfo | null,
+  key: string,
+): boolean {
+  return manager?.metadata?.[key] === true;
+}
+
+function getManagerStringMetadata(
+  manager: DeviceManagerInfo | null,
+  key: string,
+): string | null {
+  const value = manager?.metadata?.[key];
+  return typeof value === "string" ? value : null;
+}
+
+function formatLastScanned(
+  manager: DeviceManagerInfo | null,
+  nowMs: number,
+  isScanning: boolean,
+) {
+  if (!manager) return "Disabled";
+  if (isScanning) return "Scanning now";
+
+  const lastDiscoveryAt = getManagerStringMetadata(manager, "lastDiscoveryAt");
+  if (!lastDiscoveryAt) return "Not scanned yet";
+
+  const scannedAtMs = new Date(lastDiscoveryAt).getTime();
+  if (!Number.isFinite(scannedAtMs)) return "Unknown";
+
+  const elapsedMs = Math.max(0, nowMs - scannedAtMs);
+  const elapsedMinutes = Math.floor(elapsedMs / 60_000);
+  if (elapsedMinutes < 1) return "now";
+  if (elapsedMinutes === 1) return "1 min ago";
+  return `${elapsedMinutes} mins ago`;
 }
