@@ -26,8 +26,8 @@ class AuthService {
     const errors = [];
 
     if (!this.sessionSecret) errors.push('SESSION_SECRET is required');
-    if (!this.dashboardPasswordHash && !this.dashboardPassword) {
-      errors.push('DASHBOARD_PASSWORD_HASH or DASHBOARD_PASSWORD is required');
+    if (!this.passwordHash) {
+      errors.push('DASHBOARD_PASSWORD_HASH is required');
     }
 
     return errors;
