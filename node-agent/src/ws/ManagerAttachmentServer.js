@@ -6,9 +6,10 @@ const { Server } = requireDependency('socket.io');
 const { AttachedManager } = require('../managers/AttachedManager');
 
 class ManagerAttachmentServer {
-  constructor({ port = 3201, token, onAttach, onDetach, onInventory, onHealth }) {
+  constructor({ port = 3201, token, tokenMap, onAttach, onDetach, onInventory, onHealth }) {
     this.port = port;
     this.token = token;
+    this.tokenMap = tokenMap;
     this.onAttach = onAttach;
     this.onDetach = onDetach;
     this.onInventory = onInventory;
@@ -25,7 +26,20 @@ class ManagerAttachmentServer {
 
     this.io.on('connection', (socket) => {
       socket.on('manager:attach', async (payload = {}, ack) => {
-        if (this.token && payload.token !== this.token) {
+        const managerId = payload.info?.id || payload.info?.managerId || payload.id || payload.managerId;
+        const expectedToken = resolveExpectedToken({
+          id: managerId,
+          sharedToken: this.token,
+          tokenMap: this.tokenMap,
+        });
+
+        if (!expectedToken) {
+          ack?.({ ok: false, error: 'Manager auth is not configured on this node agent' });
+          socket.disconnect(true);
+          return;
+        }
+
+        if (payload.token !== expectedToken) {
           ack?.({ ok: false, error: 'Invalid manager token' });
           socket.disconnect(true);
           return;
@@ -104,3 +118,29 @@ function normalizeManagerInfo(info = {}) {
 }
 
 module.exports = { ManagerAttachmentServer };
+
+function resolveExpectedToken({ id, sharedToken, tokenMap }) {
+  const parsedMap = parseTokenMap(tokenMap);
+  if (id && parsedMap[id]) return parsedMap[id];
+  return sharedToken || '';
+}
+
+function parseTokenMap(raw) {
+  if (!raw) return {};
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') return parsed;
+  } catch {}
+
+  return String(raw)
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .reduce((acc, entry) => {
+      const separator = entry.indexOf(':');
+      if (separator === -1) return acc;
+      acc[entry.slice(0, separator).trim()] = entry.slice(separator + 1).trim();
+      return acc;
+    }, {});
+}

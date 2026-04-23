@@ -17,8 +17,18 @@ SENSOR_HISTORY_SIZE=200
 DATABASE_URL=postgres://gestura:gestura@localhost:5432/gestura
 DATABASE_SSL=false
 
-# Optional node-agent authentication. If set, node agents must send this as NODE_TOKEN.
-NODE_TOKEN=
+# Dashboard session auth. DASHBOARD_PASSWORD_HASH uses:
+# scrypt$<salt_hex>$<derived_key_hex>
+SESSION_SECRET=replace-with-long-random-secret
+DASHBOARD_USERNAME=admin
+DASHBOARD_PASSWORD_HASH=
+
+# Service-to-service auth.
+NODE_SHARED_TOKEN=replace-with-node-shared-secret
+PICO_API_TOKEN=replace-with-pico-bearer-token
+
+# Optional per-node token map instead of NODE_SHARED_TOKEN.
+# NODE_TOKEN_MAP={"pi-edge-1":"secret-1","pi-edge-2":"secret-2"}
 
 # Optional Grafana annotation upload for telemetry. Leave unset to store telemetry only in Postgres/memory.
 GRAFANA_URL=
@@ -30,17 +40,18 @@ GRAFANA_ORG_ID=
 # CENTRAL_WS_URL=http://localhost:3001
 # NODE_ID=pi-edge-1
 # NODE_NAME=Pi Edge 1
-# NODE_TOKEN=
+# NODE_TOKEN=replace-with-node-shared-secret
 # NODE_LAN_URL=http://192.168.1.25:3201
 # NODE_AGENT_PORT=3201
-# MANAGER_TOKEN=
+# MANAGER_SHARED_TOKEN=replace-with-manager-shared-secret
+# MANAGER_TOKEN_MAP={"kasa-main":"token-a","sim-main":"token-b"}
 
 # Manager process examples:
 # NODE_AGENT_WS_URL=http://localhost:3201
 # MANAGER_ID=kasa-main
 # MANAGER_KIND=kasa
 # MANAGER_NAME=Kasa Main
-# MANAGER_TOKEN=
+# MANAGER_TOKEN=replace-with-manager-shared-secret
 # MANAGER_ICON_KEY=lightbulb
 # MANAGER_COLOR_KEY=amber
 # MANAGER_LAN_URL=http://192.168.1.25:3301

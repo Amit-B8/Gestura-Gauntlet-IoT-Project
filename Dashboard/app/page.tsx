@@ -24,6 +24,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { DEFAULT_BACKEND_URL, fetchBackend } from "@/lib/backend-auth";
 
 type NetworkStatus = "connected" | "disconnected" | "unknown";
 type GloveMode = "active" | "passive";
@@ -49,7 +50,7 @@ const emptySensorData: SensorData = { x: 0, y: 0, z: 0, gx: 0, gy: 0, gz: 0 };
 let socket: Socket | null = null;
 
 export default function Dashboard() {
-  const [brokerUrl, setBrokerUrl] = useState("http://localhost:3001");
+  const [brokerUrl, setBrokerUrl] = useState(DEFAULT_BACKEND_URL);
   const [networkStatus, setNetworkStatus] = useState<NetworkStatus>("unknown");
   const [activeMode, setActiveMode] = useState<GloveMode>("passive");
   const [selectedDevice] = useState("desk_lamp");
@@ -69,7 +70,9 @@ export default function Dashboard() {
   const [lastStatusSync, setLastStatusSync] = useState<string | null>(null);
 
   useEffect(() => {
-    socket = io(brokerUrl);
+    socket = io(brokerUrl, {
+      withCredentials: true,
+    });
 
     socket.on("connect", () => {
       setNetworkStatus("connected");
@@ -78,6 +81,10 @@ export default function Dashboard() {
 
     socket.on("disconnect", () => {
       setNetworkStatus("disconnected");
+    });
+
+    socket.on("connect_error", () => {
+      window.location.href = "/login";
     });
 
     socket.on("modeUpdate", (newMode: string) => {
@@ -138,7 +145,7 @@ export default function Dashboard() {
   const refreshStatus = async () => {
     const startedAt = performance.now();
     try {
-      const response = await fetch(`${brokerUrl}/api/status`);
+      const response = await fetchBackend(`${brokerUrl}/api/status`);
       if (!response.ok) throw new Error(`Status ${response.status}`);
       const data = await response.json();
       setStatusLatencyMs(Math.round(performance.now() - startedAt));

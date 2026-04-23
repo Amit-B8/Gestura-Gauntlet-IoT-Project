@@ -14,6 +14,7 @@ class NodeAgent {
     cache = new LocalNodeCache(),
     managerAttachPort = 3201,
     managerToken,
+    managerTokenMap,
   }) {
     this.centralApiUrl = centralApiUrl || centralUrl;
     this.centralWsUrl = centralWsUrl || centralUrl;
@@ -27,6 +28,7 @@ class NodeAgent {
     this.managerAttachmentServer = new ManagerAttachmentServer({
       port: managerAttachPort,
       token: managerToken,
+      tokenMap: managerTokenMap,
       onAttach: (manager) => this.attachManager(manager),
       onDetach: (socketId) => this.detachManagerBySocket(socketId),
       onInventory: (managerId, devices) => this.updateManagerInventory(managerId, devices),
@@ -35,9 +37,13 @@ class NodeAgent {
   }
 
   async start() {
+    if (!this.node?.token) {
+      throw new Error('NODE_TOKEN is required for node-agent -> central authentication');
+    }
+
     this.socket = io(`${this.centralWsUrl}/nodes`, {
       transports: ['websocket', 'polling'],
-      auth: { token: this.node.token },
+      auth: { token: this.node.token, nodeId: this.node.id },
     });
 
     this.socket.on('connect', () => void this.register());

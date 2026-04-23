@@ -2,11 +2,27 @@ function registerNodeAgentSocket(io, services) {
   const namespace = io.of('/nodes');
 
   namespace.use((socket, next) => {
-    const expectedToken = process.env.NODE_TOKEN || process.env.CENTRAL_NODE_TOKEN;
-    if (expectedToken && socket.handshake.auth?.token !== expectedToken) {
+    const auth = socket.handshake.auth || {};
+    const nodeId = String(auth.nodeId || auth.id || '');
+    const expectedToken = resolveExpectedToken({
+      id: nodeId,
+      sharedToken:
+        process.env.NODE_SHARED_TOKEN ||
+        process.env.NODE_TOKEN ||
+        process.env.CENTRAL_NODE_TOKEN,
+      tokenMap: process.env.NODE_TOKEN_MAP,
+    });
+
+    if (!expectedToken) {
+      next(new Error('Node auth is not configured on the control plane'));
+      return;
+    }
+
+    if (auth.token !== expectedToken) {
       next(new Error('Invalid node token'));
       return;
     }
+
     next();
   });
 
@@ -15,6 +31,12 @@ function registerNodeAgentSocket(io, services) {
 
     socket.on('node:register', async (payload = {}, ack) => {
       currentNodeId = String(payload.id || socket.id);
+      const handshakeNodeId = socket.handshake.auth?.nodeId;
+      if (handshakeNodeId && handshakeNodeId !== currentNodeId) {
+        ack?.({ ok: false, error: 'nodeId mismatch between handshake and registration' });
+        return;
+      }
+
       const node = services.nodeRegistry.upsert({
         id: currentNodeId,
         name: payload.name || currentNodeId,
@@ -211,6 +233,30 @@ function emitWithAck(socket, event, payload) {
   });
 }
 
-module.exports = { emitWithAck, SocketRequestError };
+module.exports = { emitWithAck, SocketRequestError, registerNodeAgentSocket };
 
-module.exports = { registerNodeAgentSocket };
+function resolveExpectedToken({ id, sharedToken, tokenMap }) {
+  const parsedMap = parseTokenMap(tokenMap);
+  if (id && parsedMap[id]) return parsedMap[id];
+  return sharedToken || '';
+}
+
+function parseTokenMap(raw) {
+  if (!raw) return {};
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') return parsed;
+  } catch {}
+
+  return String(raw)
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .reduce((acc, entry) => {
+      const separator = entry.indexOf(':');
+      if (separator === -1) return acc;
+      acc[entry.slice(0, separator).trim()] = entry.slice(separator + 1).trim();
+      return acc;
+    }, {});
+}

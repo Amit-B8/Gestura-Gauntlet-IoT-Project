@@ -34,6 +34,7 @@ import {
   sourceInputs,
   SystemStatus,
 } from "@/lib/gestura-config";
+import { DEFAULT_BACKEND_URL, fetchBackend } from "@/lib/backend-auth";
 import { getManagerColor, getManagerIcon } from "@/lib/manager-display";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -53,6 +54,7 @@ type DeviceActionResult = {
   deviceId: string;
   capabilityId: string;
   appliedValue?: string | number | boolean | null;
+  error?: string;
   message?: string;
 };
 
@@ -65,7 +67,7 @@ export default function ConfigurationPage() {
   const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [inventoryTab, setInventoryTab] = useState<"nodes" | "managers" | "devices" | "mappings">("nodes");
-  const [backendUrl, setBackendUrl] = useState("http://localhost:3001");
+  const [backendUrl, setBackendUrl] = useState(DEFAULT_BACKEND_URL);
   const [testCapabilityId, setTestCapabilityId] = useState<string>("");
   const [testValue, setTestValue] = useState<string>("");
   const [testStatus, setTestStatus] = useState("Select a device function to test.");
@@ -142,21 +144,21 @@ export default function ConfigurationPage() {
 
   const refreshManagersAndDevices = async () => {
     try {
-      const managerResponse = await fetch(`${backendUrl}/api/managers`);
+      const managerResponse = await fetchBackend(`${backendUrl}/api/managers`);
       const managerList = managerResponse.ok
       ? ((await managerResponse.json()) as DeviceManagerInfo[])
       : [];
       setManagers(managerList);
       console.log("manager.interfaces", managerList.forEach((manager) => console.log(manager.interfaces)));;
 
-      const systemResponse = await fetch(`${backendUrl}/api/system/status`);
+      const systemResponse = await fetchBackend(`${backendUrl}/api/system/status`);
       if (systemResponse.ok) setSystemStatus((await systemResponse.json()) as SystemStatus);
 
-      const nodeResponse = await fetch(`${backendUrl}/api/nodes`);
+      const nodeResponse = await fetchBackend(`${backendUrl}/api/nodes`);
       const nodeList = nodeResponse.ok ? ((await nodeResponse.json()) as NodeInfo[]) : [];
       setNodes(nodeList);
 
-      const deviceResponse = await fetch(`${backendUrl}/api/devices`);
+      const deviceResponse = await fetchBackend(`${backendUrl}/api/devices`);
       const backendDevices = deviceResponse.ok
         ? ((await deviceResponse.json()) as BackendManagedDevice[])
         : [];
@@ -172,7 +174,7 @@ export default function ConfigurationPage() {
           ? current
           : mappedDevices[0]?.id ?? null,
       );
-      const mappingResponse = await fetch(`${backendUrl}/api/mappings`);
+      const mappingResponse = await fetchBackend(`${backendUrl}/api/mappings`);
       const mappingList = mappingResponse.ok ? ((await mappingResponse.json()) as GloveMappingContract[]) : [];
       setCentralMappings(mappingList);
     } catch (error) {
@@ -187,7 +189,7 @@ export default function ConfigurationPage() {
     setTestStatus(`Running ${selectedDevice.name}.${testCapability.id}.`);
 
     try {
-      const response = await fetch(
+      const response = await fetchBackend(
         `${backendUrl}/api/devices/${encodeURIComponent(selectedDevice.id)}/actions/${encodeURIComponent(testCapability.id)}`,
         {
           method: "POST",

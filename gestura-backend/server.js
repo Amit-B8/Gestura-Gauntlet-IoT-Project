@@ -19,6 +19,8 @@ const { RouteMetricsService } = require('./runtime/metrics/RouteMetricsService')
 const { TelemetryService } = require('./runtime/metrics/TelemetryService');
 const { GrafanaTelemetrySink } = require('./runtime/metrics/GrafanaTelemetrySink');
 const { GloveConfigService } = require('./runtime/glove/GloveConfigService');
+const { AuthService } = require('./runtime/auth/AuthService');
+const { createAuthRouter } = require('./runtime/routes/auth');
 const { createManagersRouter } = require('./runtime/routes/managers');
 const { createDevicesRouter } = require('./runtime/routes/devices');
 const { createMappingsRouter } = require('./runtime/routes/mappings');
@@ -37,7 +39,7 @@ try {
 }
 
 const app = express();
-app.use(cors());
+app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 
 app.use((err, req, res, next) => {
@@ -53,7 +55,7 @@ app.use((err, req, res, next) => {
 
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: '*', methods: ['GET', 'POST'] },
+  cors: { origin: true, methods: ['GET', 'POST'], credentials: true },
 });
 
 const MQTT_TOPIC_SENSORS = process.env.MQTT_TOPIC_SENSORS || 'gauntlet/sensors';
@@ -80,6 +82,7 @@ const gloveConfigService = new GloveConfigService({
   persistence,
   telemetryService,
 });
+const authService = new AuthService();
 const brokerServer = net.createServer(aedes.handle);
 
 let currentMode = 'passive';
@@ -222,7 +225,9 @@ aedes.on('publish', (packet, client) => {
   }
 });
 
-io.on('connection', (socket) => {
+io.of('/').use((socket, next) => authService.authenticateDashboardSocket(socket, next));
+
+io.of('/').on('connection', (socket) => {
   console.log('[WS] Dashboard connected:', socket.id);
 
   socket.emit('modeUpdate', currentMode);
@@ -250,7 +255,9 @@ io.on('connection', (socket) => {
   });
 });
 
-app.post('/api/data', async (req, res) => {
+app.use('/api/auth', createAuthRouter({ authService }));
+
+app.post('/api/data', authService.requireDashboardOrPicoToken(), async (req, res) => {
   try {
     const latest = await handleSensorUpdate(req.body, 'http');
     res.json({ mode: currentMode, sensor: latest });
@@ -259,19 +266,19 @@ app.post('/api/data', async (req, res) => {
   }
 });
 
-app.get('/api/status', (req, res) => {
+app.get('/api/status', authService.requireDashboardSession(), (req, res) => {
   res.json(publicStatus());
 });
 
-app.get('/api/sensors/latest', (req, res) => {
+app.get('/api/sensors/latest', authService.requireDashboardSession(), (req, res) => {
   res.json(sensorStore.getState().latest || {});
 });
 
-app.get('/api/sensors/history', (req, res) => {
+app.get('/api/sensors/history', authService.requireDashboardSession(), (req, res) => {
   res.json(sensorStore.getHistory());
 });
 
-app.post('/api/mode', (req, res) => {
+app.post('/api/mode', authService.requireDashboardOrPicoToken(), (req, res) => {
   try {
     res.json({ success: true, mode: setMode(req.body?.mode, 'http') });
   } catch (err) {
@@ -293,17 +300,18 @@ const services = {
   grafanaSink,
   gloveConfigService,
   systemStatus,
+  authService,
 };
 
-app.use('/api/managers', createManagersRouter(services));
-app.use('/api/devices', createDevicesRouter(services));
-app.use('/api/mappings', createMappingsRouter(services));
-app.use('/api/scenes', createScenesRouter(services));
-app.use('/api/nodes', createNodesRouter(services));
-app.use('/api/route-metrics', createRouteMetricsRouter(services));
-app.use('/api/telemetry', createTelemetryRouter(services));
-app.use('/api/system', createSystemRouter(services));
-app.use('/api/gloves', createGlovesRouter(services));
+app.use('/api/managers', authService.requireDashboardSession(), createManagersRouter(services));
+app.use('/api/devices', authService.requireDashboardSession(), createDevicesRouter(services));
+app.use('/api/mappings', authService.requireDashboardSession(), createMappingsRouter(services));
+app.use('/api/scenes', authService.requireDashboardSession(), createScenesRouter(services));
+app.use('/api/nodes', authService.requireDashboardSession(), createNodesRouter(services));
+app.use('/api/route-metrics', authService.requireDashboardSession(), createRouteMetricsRouter(services));
+app.use('/api/telemetry', authService.requireDashboardSession(), createTelemetryRouter(services));
+app.use('/api/system', authService.requireDashboardSession(), createSystemRouter(services));
+app.use('/api/gloves', authService.requireDashboardOrPicoToken(), createGlovesRouter(services));
 registerNodeAgentSocket(io, services);
 
 const PORT = Number(process.env.PORT || 3001);
@@ -313,6 +321,21 @@ server.on('error', (err) => {
 });
 
 async function start() {
+  const authConfigErrors = authService.validateConfig();
+  if (
+    !process.env.NODE_SHARED_TOKEN &&
+    !process.env.NODE_TOKEN &&
+    !process.env.CENTRAL_NODE_TOKEN &&
+    !process.env.NODE_TOKEN_MAP
+  ) {
+    authConfigErrors.push('NODE_SHARED_TOKEN, NODE_TOKEN, CENTRAL_NODE_TOKEN, or NODE_TOKEN_MAP is required');
+  }
+  if (authConfigErrors.length) {
+    console.error(`[Auth] Startup failed: ${authConfigErrors.join('; ')}`);
+    process.exitCode = 1;
+    return;
+  }
+
   try {
     const persistenceEnabled = await persistence.init();
     if (persistenceEnabled) {

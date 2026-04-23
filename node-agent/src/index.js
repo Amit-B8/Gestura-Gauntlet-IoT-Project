@@ -4,6 +4,16 @@ async function main() {
   const centralApiUrl = process.env.CENTRAL_API_URL || process.env.CENTRAL_URL || 'http://localhost:3001';
   const centralWsUrl = process.env.CENTRAL_WS_URL || centralApiUrl;
   const nodeId = process.env.NODE_ID || 'pi-edge-1';
+  const nodeToken = process.env.NODE_TOKEN || process.env.NODE_SHARED_TOKEN;
+  const managerToken = process.env.MANAGER_SHARED_TOKEN || process.env.MANAGER_TOKEN;
+  const managerTokenMap = process.env.MANAGER_TOKEN_MAP;
+
+  if (!nodeToken) {
+    throw new Error('NODE_TOKEN or NODE_SHARED_TOKEN is required');
+  }
+  if (!managerToken && !managerTokenMap) {
+    throw new Error('MANAGER_SHARED_TOKEN, MANAGER_TOKEN, or MANAGER_TOKEN_MAP is required');
+  }
 
   const agent = new NodeAgent({
     centralApiUrl,
@@ -11,14 +21,15 @@ async function main() {
     node: {
       id: nodeId,
       name: process.env.NODE_NAME || nodeId,
-      token: process.env.NODE_TOKEN,
+      token: nodeToken,
       interfaces: process.env.NODE_LAN_URL
         ? [{ kind: 'lan', url: process.env.NODE_LAN_URL, priority: 10 }]
         : [],
       metadata: { role: 'edge' },
     },
     managerAttachPort: Number(process.env.NODE_AGENT_PORT || 3201),
-    managerToken: process.env.MANAGER_TOKEN,
+    managerToken,
+    managerTokenMap,
   });
 
   await agent.start();

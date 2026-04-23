@@ -12,6 +12,9 @@ async function main() {
     process.env.NODE_AGENT_WS_URL ||
     process.env.NODE_AGENT_URL ||
     'http://localhost:3201';
+  if (!process.env.MANAGER_TOKEN) {
+    throw new Error('MANAGER_TOKEN is required for kasa-manager -> node-agent authentication');
+  }
 
   const manager = createKasaManager({
     id: process.env.MANAGER_ID || 'kasa-main',

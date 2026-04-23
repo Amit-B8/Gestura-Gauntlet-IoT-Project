@@ -35,6 +35,9 @@ export function attachSimulatorToNodeAgent(store: DeviceStore) {
     process.env.NODE_AGENT_WS_URL ||
     process.env.NODE_AGENT_URL ||
     "http://localhost:3201";
+  if (!process.env.MANAGER_TOKEN) {
+    throw new Error("MANAGER_TOKEN is required for sim-manager -> node-agent authentication");
+  }
 
   debugLog("[SimManager] Attempting to connect to Node Agent at", nodeAgentUrl);
 
