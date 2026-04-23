@@ -1,18 +1,28 @@
 const crypto = require('crypto');
 
 const SESSION_COOKIE_NAME = 'gestura_session';
+const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 1000 * 60 * 60 * 12);
 
 class AuthService {
-  constructor(options = {}) {
-    this.dashboardUsername = options.dashboardUsername || process.env.DASHBOARD_USERNAME || 'admin';
-    this.dashboardPasswordHash = options.dashboardPasswordHash || process.env.DASHBOARD_PASSWORD_HASH || '';
-    this.dashboardPassword = options.dashboardPassword || process.env.DASHBOARD_PASSWORD || '';
-    this.sessionSecret = options.sessionSecret || process.env.SESSION_SECRET || '';
-    this.sessionTtlMs = options.sessionTtlMs || 12 * 60 * 60 * 1000;
-    this.picoToken = options.picoToken || process.env.PICO_API_TOKEN || process.env.GLOVE_API_TOKEN || '';
+  constructor() {
+    this.username = process.env.DASHBOARD_USERNAME || 'admin';
+    this.passwordHash = process.env.DASHBOARD_PASSWORD_HASH || '';
+    this.sessionSecret = process.env.SESSION_SECRET || '';
   }
 
-  validateConfig() {
+  login(username, password) {
+    if (!this.validateCredentials(username, password)) {
+      throw new Error('Invalid username or password');
+    }
+
+    return this.createSessionToken({
+      sub: username,
+      iat: Date.now(),
+      exp: Date.now() + SESSION_TTL_MS,
+    });
+  }
+
+    validateConfig() {
     const errors = [];
 
     if (!this.sessionSecret) errors.push('SESSION_SECRET is required');
@@ -23,54 +33,49 @@ class AuthService {
     return errors;
   }
 
-  login(username, password) {
-    if (!this.verifyUsername(username) || !this.verifyPassword(password)) {
-      return null;
-    }
+  validateCredentials(username, password) {
+    if (username !== this.username) return false;
+    if (!this.passwordHash) return false;
 
-    return this.createSessionToken({
-      sub: this.dashboardUsername,
-      iat: Date.now(),
-      exp: Date.now() + this.sessionTtlMs,
-    });
+    return this.verifyPassword(password, this.passwordHash);
   }
 
-  verifyUsername(username) {
-    const expected = this.dashboardUsername || 'admin';
-    const candidate = String(username || expected);
-    return candidate === expected;
-  }
+  verifyPassword(password, stored) {
+    // expected format: scrypt$<saltHex>$<hashHex>
+    const [algorithm, saltHex, expectedHashHex] = String(stored).split('$');
+    if (algorithm !== 'scrypt' || !saltHex || !expectedHashHex) return false;
 
-  verifyPassword(password) {
-    if (typeof password !== 'string' || !password.length) return false;
+    const derived = crypto.scryptSync(password, Buffer.from(saltHex, 'hex'), expectedHashHex.length / 2);
+    const expected = Buffer.from(expectedHashHex, 'hex');
 
-    if (this.dashboardPasswordHash) {
-      return verifyConfiguredHash(password, this.dashboardPasswordHash);
-    }
-
-    return timingSafeStringEqual(password, this.dashboardPassword);
+    if (derived.length !== expected.length) return false;
+    return crypto.timingSafeEqual(derived, expected);
   }
 
   createSessionToken(payload) {
-    const encodedPayload = base64url(JSON.stringify(payload));
-    const signature = signValue(encodedPayload, this.sessionSecret);
-    return `${encodedPayload}.${signature}`;
-  }
+    if (!this.sessionSecret) {
+      throw new Error('SESSION_SECRET is not configured');
+    }
 
-  readSession(req) {
-    const cookies = parseCookies(req.headers?.cookie || '');
-    return this.verifySessionToken(cookies[SESSION_COOKIE_NAME]);
+    const encodedPayload = base64UrlEncode(JSON.stringify(payload));
+    const signature = this.signValue(encodedPayload);
+    return `${encodedPayload}.${signature}`;
   }
 
   verifySessionToken(token) {
     if (!token || !this.sessionSecret) return null;
+
     const [encodedPayload, signature] = String(token).split('.');
     if (!encodedPayload || !signature) return null;
-    if (!timingSafeStringEqual(signature, signValue(encodedPayload, this.sessionSecret))) return null;
+
+    const expectedSignature = this.signValue(encodedPayload);
+    if (!timingSafeEqualString(signature, expectedSignature)) return null;
 
     try {
-      const payload = JSON.parse(Buffer.from(encodedPayload, 'base64url').toString('utf8'));
-      if (!payload?.sub || !payload?.exp || payload.exp < Date.now()) return null;
+      const payload = JSON.parse(base64UrlDecode(encodedPayload));
+      if (!payload?.sub || !payload?.exp || payload.exp < Date.now()) {
+        return null;
+      }
       return payload;
     } catch {
       return null;
@@ -82,8 +87,8 @@ class AuthService {
       httpOnly: true,
       sameSite: 'lax',
       secure: process.env.NODE_ENV === 'production',
-      maxAge: this.sessionTtlMs,
       path: '/',
+      maxAge: SESSION_TTL_MS,
     });
   }
 
@@ -96,122 +101,119 @@ class AuthService {
     });
   }
 
-  requireDashboardSession() {
-    return (req, res, next) => {
-      const session = this.readSession(req);
-      if (!session) {
-        res.status(401).json({ ok: false, error: 'Authentication required', code: 'AUTH_REQUIRED' });
-        return;
-      }
+  extractSessionToken(req) {
+    const authHeader = req.headers.authorization || '';
+    if (authHeader.startsWith('Bearer ')) {
+      return authHeader.slice('Bearer '.length).trim();
+    }
 
-      req.dashboardSession = session;
-      next();
-    };
+    const cookieToken = req.cookies?.[SESSION_COOKIE_NAME];
+    if (cookieToken) return cookieToken;
+
+    return null;
   }
 
-  requirePicoToken() {
+  requireDashboardAuth() {
     return (req, res, next) => {
-      if (this.hasValidPicoToken(req)) {
-        next();
-        return;
+      const token = this.extractSessionToken(req);
+      const session = this.verifySessionToken(token);
+
+      if (!session) {
+        return res.status(401).json({
+          ok: false,
+          error: 'Unauthorized',
+        });
       }
 
-      res.status(401).json({ ok: false, error: 'Valid Pico token required', code: 'PICO_TOKEN_REQUIRED' });
+      req.session = session;
+      next();
     };
   }
 
   requireDashboardOrPicoToken() {
     return (req, res, next) => {
-      const session = this.readSession(req);
+      const token = this.extractSessionToken(req);
+      const session = this.verifySessionToken(token);
+
       if (session) {
-        req.dashboardSession = session;
-        next();
-        return;
+        req.session = session;
+        return next();
       }
 
-      if (this.hasValidPicoToken(req)) {
-        next();
-        return;
+      const picoToken = req.headers['x-pico-token'];
+      const expectedPicoToken = process.env.PICO_SHARED_TOKEN;
+
+      if (expectedPicoToken && picoToken === expectedPicoToken) {
+        req.session = { sub: 'pico', kind: 'device' };
+        return next();
       }
 
-      res.status(401).json({ ok: false, error: 'Authentication required', code: 'AUTH_REQUIRED' });
+      return res.status(401).json({
+        ok: false,
+        error: 'Unauthorized',
+      });
     };
   }
 
-  hasValidPicoToken(req) {
-    if (!this.picoToken) return false;
-    const provided = getBearerToken(req.headers?.authorization) || req.query?.api_key;
-    if (!provided) return false;
-    return timingSafeStringEqual(String(provided), this.picoToken);
-  }
-
   authenticateDashboardSocket(socket, next) {
-    const session = this.verifySessionToken(
-      parseCookies(socket.request?.headers?.cookie || '')[SESSION_COOKIE_NAME],
-    );
+    try {
+      const cookieHeader = socket.handshake.headers.cookie || '';
+      const token =
+        parseCookie(cookieHeader)[SESSION_COOKIE_NAME] ||
+        extractBearerFromHandshake(socket.handshake.auth?.token);
 
-    if (!session) {
-      next(new Error('Authentication required'));
-      return;
+      const session = this.verifySessionToken(token);
+      if (!session) {
+        return next(new Error('Unauthorized'));
+      }
+
+      socket.data.session = session;
+      return next();
+    } catch {
+      return next(new Error('Unauthorized'));
     }
+  }
 
-    socket.dashboardSession = session;
-    next();
+  signValue(value) {
+    return crypto.createHmac('sha256', this.sessionSecret).update(value).digest('base64url');
   }
 }
 
-function verifyConfiguredHash(password, configuredHash) {
-  if (configuredHash.startsWith('scrypt$')) {
-    const [, saltHex, expectedHex] = configuredHash.split('$');
-    if (!saltHex || !expectedHex) return false;
-    const derived = crypto.scryptSync(password, Buffer.from(saltHex, 'hex'), Buffer.from(expectedHex, 'hex').length);
-    return timingSafeBufferEqual(derived, Buffer.from(expectedHex, 'hex'));
-  }
-
-  return timingSafeStringEqual(password, configuredHash);
+function base64UrlEncode(value) {
+  return Buffer.from(value, 'utf8').toString('base64url');
 }
 
-function signValue(value, secret) {
-  return crypto.createHmac('sha256', secret).update(value).digest('base64url');
+function base64UrlDecode(value) {
+  return Buffer.from(value, 'base64url').toString('utf8');
 }
 
-function parseCookies(header) {
-  return String(header || '')
+function timingSafeEqualString(a, b) {
+  const aBuf = Buffer.from(a);
+  const bBuf = Buffer.from(b);
+  if (aBuf.length !== bBuf.length) return false;
+  return crypto.timingSafeEqual(aBuf, bBuf);
+}
+
+function parseCookie(cookieHeader) {
+  return String(cookieHeader)
     .split(';')
     .map((part) => part.trim())
     .filter(Boolean)
     .reduce((acc, part) => {
-      const separator = part.indexOf('=');
-      if (separator === -1) return acc;
-      const key = part.slice(0, separator).trim();
-      const value = part.slice(separator + 1).trim();
+      const index = part.indexOf('=');
+      if (index === -1) return acc;
+      const key = part.slice(0, index).trim();
+      const value = part.slice(index + 1).trim();
       acc[key] = decodeURIComponent(value);
       return acc;
     }, {});
 }
 
-function getBearerToken(header) {
-  if (!header) return null;
-  const match = String(header).match(/^Bearer\s+(.+)$/i);
-  return match?.[1] || null;
+function extractBearerFromHandshake(token) {
+  if (!token) return null;
+  if (typeof token !== 'string') return null;
+  if (token.startsWith('Bearer ')) return token.slice('Bearer '.length).trim();
+  return token;
 }
 
-function base64url(value) {
-  return Buffer.from(value, 'utf8').toString('base64url');
-}
-
-function timingSafeStringEqual(a, b) {
-  if (typeof a !== 'string' || typeof b !== 'string') return false;
-  return timingSafeBufferEqual(Buffer.from(a), Buffer.from(b));
-}
-
-function timingSafeBufferEqual(a, b) {
-  if (!Buffer.isBuffer(a) || !Buffer.isBuffer(b)) return false;
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(a, b);
-}
-
-module.exports = {
-  AuthService,
-  SESSION_COOKIE_NAME,
-};
+module.exports = { AuthService };

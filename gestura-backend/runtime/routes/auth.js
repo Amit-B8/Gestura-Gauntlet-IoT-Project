@@ -3,34 +3,63 @@ const express = require('express');
 function createAuthRouter({ authService }) {
   const router = express.Router();
 
-  router.get('/session', (req, res) => {
-    const session = authService.readSession(req);
-    if (!session) {
-      res.status(401).json({ authenticated: false });
-      return;
-    }
-
-    res.json({
-      authenticated: true,
-      username: session.sub,
-      expiresAt: new Date(session.exp).toISOString(),
-    });
-  });
-
   router.post('/login', (req, res) => {
-    const token = authService.login(req.body?.username, req.body?.password);
-    if (!token) {
-      res.status(401).json({ ok: false, error: 'Invalid credentials' });
-      return;
-    }
+    const { username, password } = req.body || {};
 
-    authService.setSessionCookie(res, token);
-    res.json({ ok: true, username: authService.dashboardUsername });
+    try {
+      const token = authService.login(username, password);
+
+      if (!token) {
+        return res.status(401).json({
+          ok: false,
+          error: 'Invalid username or password',
+        });
+      }
+
+      // Optional: keep this if your non-Next backend clients still use backend cookies
+      // if (typeof authService.setSessionCookie === 'function') {
+      //   authService.setSessionCookie(res, token);
+      // }
+
+      return res.json({
+        ok: true,
+        token,
+      });
+    } catch (err) {
+      return res.status(401).json({
+        ok: false,
+        error: err.message || 'Login failed',
+      });
+    }
   });
 
-  router.post('/logout', (_req, res) => {
-    authService.clearSessionCookie(res);
-    res.json({ ok: true });
+  router.post('/logout', (req, res) => {
+    if (typeof authService.clearSessionCookie === 'function') {
+      authService.clearSessionCookie(res);
+    }
+
+    return res.json({ ok: true });
+  });
+
+  router.get('/session', (req, res) => {
+    const token =
+      req.cookies?.gestura_session ||
+      authService.extractSessionToken?.(req) ||
+      null;
+
+    if (!token) {
+      return res.status(401).json({ ok: false, error: 'No session' });
+    }
+
+    const session = authService.verifySessionToken(token);
+    if (!session) {
+      return res.status(401).json({ ok: false, error: 'Invalid session' });
+    }
+
+    return res.json({
+      ok: true,
+      session,
+    });
   });
 
   return router;

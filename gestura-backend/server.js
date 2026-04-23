@@ -266,15 +266,15 @@ app.post('/api/data', authService.requireDashboardOrPicoToken(), async (req, res
   }
 });
 
-app.get('/api/status', authService.requireDashboardSession(), (req, res) => {
+app.get('/api/status', authService.requireDashboardAuth(), (req, res) => {
   res.json(publicStatus());
 });
 
-app.get('/api/sensors/latest', authService.requireDashboardSession(), (req, res) => {
+app.get('/api/sensors/latest', authService.requireDashboardAuth(), (req, res) => {
   res.json(sensorStore.getState().latest || {});
 });
 
-app.get('/api/sensors/history', authService.requireDashboardSession(), (req, res) => {
+app.get('/api/sensors/history', authService.requireDashboardAuth(), (req, res) => {
   res.json(sensorStore.getHistory());
 });
 
@@ -303,15 +303,15 @@ const services = {
   authService,
 };
 
-app.use('/api/managers', authService.requireDashboardSession(), createManagersRouter(services));
-app.use('/api/devices', authService.requireDashboardSession(), createDevicesRouter(services));
-app.use('/api/mappings', authService.requireDashboardSession(), createMappingsRouter(services));
-app.use('/api/scenes', authService.requireDashboardSession(), createScenesRouter(services));
-app.use('/api/nodes', authService.requireDashboardSession(), createNodesRouter(services));
-app.use('/api/route-metrics', authService.requireDashboardSession(), createRouteMetricsRouter(services));
-app.use('/api/telemetry', authService.requireDashboardSession(), createTelemetryRouter(services));
-app.use('/api/system', authService.requireDashboardSession(), createSystemRouter(services));
-app.use('/api/gloves', authService.requireDashboardOrPicoToken(), createGlovesRouter(services));
+app.use('/api/managers', authService.requireDashboardAuth(), createManagersRouter(services));
+app.use('/api/devices', authService.requireDashboardAuth(), createDevicesRouter(services));
+app.use('/api/mappings', authService.requireDashboardAuth(), createMappingsRouter(services));
+app.use('/api/scenes', authService.requireDashboardAuth(), createScenesRouter(services));
+app.use('/api/nodes', authService.requireDashboardAuth(), createNodesRouter(services));
+app.use('/api/route-metrics', authService.requireDashboardAuth(), createRouteMetricsRouter(services));
+app.use('/api/telemetry', authService.requireDashboardAuth(), createTelemetryRouter(services));
+app.use('/api/system', authService.requireDashboardAuth(), createSystemRouter(services));
+app.use('/api/gloves', authService.requireDashboardAuth(), createGlovesRouter(services));
 registerNodeAgentSocket(io, services);
 
 const PORT = Number(process.env.PORT || 3001);
