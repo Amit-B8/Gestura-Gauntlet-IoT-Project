@@ -3,7 +3,15 @@
 import { Activity, Play, Pause } from "lucide-react";
 
 interface LiveSensorDataProps {
-  sensorData: { x: number; y: number; z: number; gx: number; gy: number; gz: number };
+  sensorData: {
+    x: number;
+    y: number;
+    z: number;
+    gx: number;
+    gy: number;
+    gz: number;
+    pressure: number;
+  };
   isSimulating: boolean;
   onToggleSimulation: () => void;
 }
@@ -30,6 +38,8 @@ export function LiveSensorData({
     if (absValue > 0.4) return "bg-warning";
     return "bg-primary";
   };
+
+  const pressure = Math.max(0, Math.min(100, sensorData.pressure || 0));
 
   const accelAxes = [
     { label: "X", value: sensorData.x, color: "text-primary" },
@@ -80,6 +90,21 @@ export function LiveSensorData({
       </div>
 
       <div className="space-y-8">
+        <div className="space-y-3 rounded-lg border border-border bg-secondary/30 p-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-xs font-semibold uppercase text-muted-foreground">FSR Pressure</div>
+              <p className="text-xs text-muted-foreground">Short tap cycles target, hold controls brightness.</p>
+            </div>
+            <span className="font-mono text-lg font-bold text-foreground tabular-nums">
+              {pressure.toFixed(1)}%
+            </span>
+          </div>
+          <div className="h-3 overflow-hidden rounded-full bg-background">
+            <div className="h-full rounded-full bg-primary transition-all duration-150" style={{ width: `${pressure}%` }} />
+          </div>
+        </div>
+
         <div className="space-y-6">
           <div className="text-xs font-semibold uppercase text-muted-foreground">Accelerometer (g)</div>
           {accelAxes.map((axis) => (

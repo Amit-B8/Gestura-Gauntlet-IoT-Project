@@ -75,11 +75,11 @@ const liveSensorState = {
 };
 
 // Live X-axis -> Kasa bulb brightness control.
-// Default: only active mode drives the bulb. Use GYRO_BULB_CONTROL_MODE=always
-// if you want passive dashboard viewing and bulb control at the same time.
+// Active control is now a temporary FSR clutch: hold the FSR to control the
+// selected target, release it to return to passive tracking.
 const gyroBulbControl = {
   enabled: String(process.env.GYRO_BULB_CONTROL_ENABLED || 'true') !== 'false',
-  mode: process.env.GYRO_BULB_CONTROL_MODE || 'active', // active | passive | always
+  mode: process.env.GYRO_BULB_CONTROL_MODE || 'fsr_hold', // fsr_hold | active | passive | always
   axis: process.env.GYRO_BULB_AXIS || 'x',
   axisMin: Number(process.env.GYRO_BULB_AXIS_MIN || -1),
   axisMax: Number(process.env.GYRO_BULB_AXIS_MAX || 1),
@@ -141,9 +141,49 @@ const DEFAULT_ACTIVE_COLOR = normalizeHexColor(
   '#0080ff'
 );
 
+const ACTIVE_CLUTCH_ON_PRESSURE = Math.max(
+  0,
+  Number(process.env.ACTIVE_CLUTCH_ON_PRESSURE || 20)
+);
+const ACTIVE_CLUTCH_OFF_PRESSURE = Math.max(
+  0,
+  Number(process.env.ACTIVE_CLUTCH_OFF_PRESSURE || 12)
+);
+const ACTIVE_RELEASE_COOLDOWN_MS = Math.max(
+  0,
+  Number(process.env.ACTIVE_RELEASE_COOLDOWN_MS || 3000)
+);
+const ACTIVE_HOLD_MIN_MS = Math.max(0, Number(process.env.ACTIVE_HOLD_MIN_MS || 250));
+const ACTIVE_SHORT_TAP_MAX_MS = Math.max(
+  50,
+  Number(process.env.ACTIVE_SHORT_TAP_MAX_MS || 350)
+);
+const ACTIVE_SHORT_TAP_RELEASE_PRESSURE = Math.max(
+  0,
+  Number(process.env.ACTIVE_SHORT_TAP_RELEASE_PRESSURE || 8)
+);
+
 const passiveMotionWindow = [];
 const passiveBulbConfigs = new Map();
 const activeBulbConfigs = new Map();
+const activeControl = {
+  engaged: false,
+  pressure: 0,
+  selectedTargetHost: null,
+  selectedAction: 'brightness',
+  inputSource: 'bottom_hold_roll',
+  cycleInputSource: 'bottom_tap',
+  pressStartedAt: null,
+  pressHadEngagement: false,
+  releaseCooldownUntil: 0,
+  releaseCooldownTimer: null,
+  lastEngagedAt: null,
+  lastReleasedAt: null,
+  lastShortTapAt: null,
+  lastTransitionAt: null,
+  lastPressureUpdatedAt: null,
+  lastSource: null,
+};
 const passiveMotion = {
   lastSample: null,
   state: null,
@@ -427,7 +467,7 @@ function publicPassiveMotionState() {
 }
 
 function logPassiveTelemetry(sensor) {
-  if (!PASSIVE_DEBUG_LOG_ENABLED || currentMode !== 'passive') return;
+  if (!PASSIVE_DEBUG_LOG_ENABLED) return;
 
   const now = Date.now();
   if (now - passiveMotion.lastTelemetryLogAt < PASSIVE_DEBUG_LOG_INTERVAL_MS) return;
@@ -504,7 +544,7 @@ function updatePassiveMotionState(sensor, source = 'unknown') {
 }
 
 async function syncPassiveMotionBulb(force = false) {
-  if (currentMode !== 'passive' || !passiveMotion.state) return;
+  if (isPassiveOutputPaused() || !passiveMotion.state) return;
   const desiredState = passiveMotion.state;
 
   if (!force && passiveMotion.lastAppliedState === desiredState && !passiveMotion.commandInFlight) {
@@ -579,7 +619,7 @@ async function syncPassiveMotionBulb(force = false) {
     passiveMotion.pendingState = null;
 
     if (
-      currentMode === 'passive' &&
+      !isPassiveOutputPaused() &&
       nextState &&
       nextState !== passiveMotion.lastAppliedState
     ) {
@@ -649,40 +689,206 @@ function updateActiveColorConfig(nextConfig = {}) {
   return config;
 }
 
+function activeClutchReleasePressure() {
+  return Math.min(ACTIVE_CLUTCH_OFF_PRESSURE, ACTIVE_CLUTCH_ON_PRESSURE);
+}
+
+function activeTargetId(host) {
+  return host ? `bulb:${host}` : null;
+}
+
+function ensureSelectedActiveTarget() {
+  const hosts = kasa.getBulbHosts();
+  if (!hosts.length) {
+    activeControl.selectedTargetHost = null;
+    return null;
+  }
+
+  if (!activeControl.selectedTargetHost || !hosts.includes(activeControl.selectedTargetHost)) {
+    activeControl.selectedTargetHost = hosts[0];
+  }
+
+  return activeControl.selectedTargetHost;
+}
+
+function resetGyroTrackingForActiveTarget() {
+  gyroBulbControl.smoothedAxis = null;
+  gyroBulbControl.pending = null;
+  gyroBulbControl.lastBrightness = null;
+}
+
+function cycleSelectedActiveTarget(source = 'unknown') {
+  const hosts = kasa.getBulbHosts();
+  if (!hosts.length) {
+    console.warn('[ActiveControl] Short tap ignored: no Kasa bulbs configured.');
+    return null;
+  }
+
+  const currentHost = ensureSelectedActiveTarget();
+  const currentIndex = Math.max(0, hosts.indexOf(currentHost));
+  const nextHost = hosts[(currentIndex + 1) % hosts.length];
+  activeControl.selectedTargetHost = nextHost;
+  activeControl.lastShortTapAt = new Date().toISOString();
+  activeControl.lastSource = source;
+  resetGyroTrackingForActiveTarget();
+
+  console.log(`[ActiveControl] Selected target -> ${activeTargetId(nextHost)}`);
+  io.emit('activeControlState', publicActiveControlState());
+  io.emit('gyroBulbControl', publicGyroBulbControl());
+  return nextHost;
+}
+
+function clearActiveReleaseCooldown() {
+  if (activeControl.releaseCooldownTimer) {
+    clearTimeout(activeControl.releaseCooldownTimer);
+    activeControl.releaseCooldownTimer = null;
+  }
+  activeControl.releaseCooldownUntil = 0;
+}
+
+function isActiveReleaseCoolingDown() {
+  return !activeControl.engaged && activeControl.releaseCooldownUntil > Date.now();
+}
+
+function isPassiveOutputPaused() {
+  return activeControl.engaged || isActiveReleaseCoolingDown();
+}
+
+function schedulePassiveResyncAfterActiveRelease() {
+  clearActiveReleaseCooldown();
+
+  if (ACTIVE_RELEASE_COOLDOWN_MS <= 0) {
+    passiveMotion.lastAppliedState = null;
+    void syncPassiveMotionBulb(true).catch((err) => {
+      console.error('[Passive] Release resync error:', err.message);
+    });
+    return;
+  }
+
+  activeControl.releaseCooldownUntil = Date.now() + ACTIVE_RELEASE_COOLDOWN_MS;
+  activeControl.releaseCooldownTimer = setTimeout(() => {
+    activeControl.releaseCooldownTimer = null;
+    activeControl.releaseCooldownUntil = 0;
+    io.emit('activeControlState', publicActiveControlState());
+
+    if (!activeControl.engaged) {
+      passiveMotion.lastAppliedState = null;
+      void syncPassiveMotionBulb(true).catch((err) => {
+        console.error('[Passive] Release cooldown resync error:', err.message);
+      });
+    }
+  }, ACTIVE_RELEASE_COOLDOWN_MS);
+}
+
+function publicActiveControlState() {
+  const now = Date.now();
+  const selectedHost = ensureSelectedActiveTarget();
+  const cooldownRemainingMs = Math.max(0, activeControl.releaseCooldownUntil - now);
+
+  return {
+    engaged: activeControl.engaged,
+    pressure: Number(activeControl.pressure.toFixed(1)),
+    selectedTarget: activeTargetId(selectedHost),
+    selectedTargetHost: selectedHost,
+    selectedAction: activeControl.selectedAction,
+    inputSource: activeControl.inputSource,
+    cycleInputSource: activeControl.cycleInputSource,
+    engagePressure: ACTIVE_CLUTCH_ON_PRESSURE,
+    releasePressure: activeClutchReleasePressure(),
+    releaseCooldownMs: ACTIVE_RELEASE_COOLDOWN_MS,
+    releaseCooldownRemainingMs: cooldownRemainingMs,
+    holdMinMs: ACTIVE_HOLD_MIN_MS,
+    shortTapMaxMs: ACTIVE_SHORT_TAP_MAX_MS,
+    shortTapReleasePressure: ACTIVE_SHORT_TAP_RELEASE_PRESSURE,
+    passiveOutputPaused: isPassiveOutputPaused(),
+    lastEngagedAt: activeControl.lastEngagedAt,
+    lastReleasedAt: activeControl.lastReleasedAt,
+    lastShortTapAt: activeControl.lastShortTapAt,
+    lastTransitionAt: activeControl.lastTransitionAt,
+    lastPressureUpdatedAt: activeControl.lastPressureUpdatedAt,
+    lastSource: activeControl.lastSource,
+  };
+}
+
+function updateActiveControlFromPressure(sensor, source = 'unknown') {
+  const now = Date.now();
+  const pressure = Math.max(0, toFiniteNumber(sensor.pressure, 0));
+  let changed = false;
+
+  activeControl.pressure = pressure;
+  activeControl.lastPressureUpdatedAt = new Date(now).toISOString();
+  activeControl.lastSource = source;
+  ensureSelectedActiveTarget();
+
+  if (!activeControl.pressStartedAt && pressure >= ACTIVE_SHORT_TAP_RELEASE_PRESSURE) {
+    activeControl.pressStartedAt = now;
+    activeControl.pressHadEngagement = false;
+  }
+
+  const pressAgeMs = activeControl.pressStartedAt ? now - activeControl.pressStartedAt : 0;
+  if (
+    !activeControl.engaged &&
+    pressure >= ACTIVE_CLUTCH_ON_PRESSURE &&
+    pressAgeMs >= ACTIVE_HOLD_MIN_MS
+  ) {
+    activeControl.engaged = true;
+    activeControl.pressHadEngagement = true;
+    activeControl.lastEngagedAt = new Date(now).toISOString();
+    activeControl.lastTransitionAt = activeControl.lastEngagedAt;
+    clearActiveReleaseCooldown();
+    resetGyroTrackingForActiveTarget();
+    changed = true;
+    console.log(
+      `[ActiveControl] ENGAGED pressure=${pressure.toFixed(1)} ` +
+        `target=${activeTargetId(activeControl.selectedTargetHost) ?? 'none'}`
+    );
+  } else if (activeControl.engaged && pressure <= activeClutchReleasePressure()) {
+    activeControl.engaged = false;
+    activeControl.lastReleasedAt = new Date(now).toISOString();
+    activeControl.lastTransitionAt = activeControl.lastReleasedAt;
+    activeControl.pressHadEngagement = true;
+    resetGyroTrackingForActiveTarget();
+    schedulePassiveResyncAfterActiveRelease();
+    changed = true;
+    console.log(
+      `[ActiveControl] RELEASED pressure=${pressure.toFixed(1)} ` +
+        `cooldown=${ACTIVE_RELEASE_COOLDOWN_MS}ms`
+    );
+  }
+
+  if (activeControl.pressStartedAt && pressure <= ACTIVE_SHORT_TAP_RELEASE_PRESSURE) {
+    const durationMs = now - activeControl.pressStartedAt;
+    if (!activeControl.pressHadEngagement && durationMs <= ACTIVE_SHORT_TAP_MAX_MS) {
+      cycleSelectedActiveTarget(source);
+      changed = true;
+    }
+    activeControl.pressStartedAt = null;
+    activeControl.pressHadEngagement = false;
+  }
+
+  if (changed) {
+    io.emit('activeControlState', publicActiveControlState());
+    io.emit('gyroBulbControl', publicGyroBulbControl());
+  }
+
+  return changed;
+}
+
 async function applyModeOutputs() {
   io.emit('modeUpdate', currentMode);
   io.emit('gyroBulbControl', publicGyroBulbControl());
   io.emit('passiveMotionState', publicPassiveMotionState());
+  io.emit('activeControlState', publicActiveControlState());
 
-  if (currentMode === 'passive') {
+  if (!isPassiveOutputPaused()) {
     passiveMotion.lastAppliedState = null;
     await syncPassiveMotionBulb(true);
-    return;
   }
-
-  passiveMotion.lastAppliedState = null;
-  const activeConfigs = getActiveBulbConfigs();
-  await Promise.all(
-    activeConfigs.map(async (config) => {
-      const hexColor = config.activeColor;
-      const kasaColor = rgbToKasaColor(hexToRgb(hexColor));
-      return kasa.setBulbColor(
-        {
-          hue: kasaColor.hue,
-          saturation: kasaColor.saturation,
-          brightness: kasaColor.brightness,
-          transitionMs: 500,
-        },
-        { host: config.host }
-      );
-    })
-  );
 }
 
 function isGyroBulbControlActive() {
   if (!gyroBulbControl.enabled) return false;
-  if (gyroBulbControl.mode === 'always') return true;
-  return gyroBulbControl.mode === currentMode;
+  return activeControl.engaged;
 }
 
 function brightnessChangedEnough(brightness) {
@@ -731,7 +937,7 @@ async function sendGyroBulbBrightness(update) {
 
     const result = await kasa.setBulbState(
       {
-        on_off: update.brightness > 0 ? 1 : 0,
+        on_off: gyroBulbControl.powerOffAtZero ? (update.brightness > 0 ? 1 : 0) : 1,
         hue: kasaColor.hue,
         saturation: kasaColor.saturation,
         brightness: update.brightness,
@@ -746,6 +952,9 @@ async function sendGyroBulbBrightness(update) {
       axisValue: update.axisValue,
       smoothedAxis: update.smoothedAxis,
       brightness: update.brightness,
+      host: update.host,
+      selectedTarget: activeTargetId(update.host),
+      selectedAction: activeControl.selectedAction,
       updatedAt: new Date().toISOString(),
     };
 
@@ -763,12 +972,6 @@ async function sendGyroBulbBrightness(update) {
 async function handleGyroBulbControl(sensor) {
   if (!isGyroBulbControlActive()) return;
 
-  // Only allow gyro control in active mode if the user is "holding down" (pressure > 15%)
-  const pressure = toFiniteNumber(sensor.pressure, 0);
-  if (currentMode === 'active' && pressure <= 15) {
-    return;
-  }
-
   const rawAxis = toFiniteNumber(sensor[gyroBulbControl.axis], NaN);
   if (!Number.isFinite(rawAxis)) return;
 
@@ -785,7 +988,7 @@ async function handleGyroBulbControl(sensor) {
   );
 
   const update = {
-    host: kasa.getPrimaryBulbHost(),
+    host: ensureSelectedActiveTarget(),
     axis: gyroBulbControl.axis,
     axisValue: rawAxis,
     smoothedAxis: gyroBulbControl.smoothedAxis,
@@ -793,6 +996,7 @@ async function handleGyroBulbControl(sensor) {
     queuedAt: Date.now(),
   };
 
+  if (!update.host) return;
   if (!brightnessChangedEnough(brightness)) return;
   await sendGyroBulbBrightness(update);
 }
@@ -811,6 +1015,7 @@ async function handleSensorUpdate(data, source = 'unknown') {
 
   io.emit('sensorData', liveSensorState.latest);
 
+  updateActiveControlFromPressure(payload, source);
   updatePassiveMotionState(payload, source);
   logPassiveTelemetry(payload);
 
@@ -824,21 +1029,23 @@ async function handleSensorUpdate(data, source = 'unknown') {
     io.emit('focusScore', score);
   }
 
-  if (currentMode === 'passive') {
+  if (!isPassiveOutputPaused()) {
     void syncPassiveMotionBulb().catch((err) => {
       console.error('[Passive] Bulb control error:', err.message);
     });
     return;
   }
 
-  passiveMotion.lastAppliedState = null;
-  void handleGyroBulbControl(payload).catch((err) => {
-    console.error('[GyroBulb] Control error:', err.message);
-  });
+  if (activeControl.engaged) {
+    passiveMotion.lastAppliedState = null;
+    void handleGyroBulbControl(payload).catch((err) => {
+      console.error('[GyroBulb] Control error:', err.message);
+    });
+  }
 }
 
 setInterval(() => {
-  if (!PASSIVE_DEBUG_LOG_ENABLED || currentMode !== 'passive') return;
+  if (!PASSIVE_DEBUG_LOG_ENABLED) return;
   if (!passiveMotion.lastSensorAt || passiveMotion.staleWarned) return;
 
   const ageMs = Date.now() - passiveMotion.lastSensorAt;
@@ -855,7 +1062,15 @@ function publicGyroBulbControl() {
   return {
     enabled: gyroBulbControl.enabled,
     mode: gyroBulbControl.mode,
+    activation: 'fsr_hold',
     active: isGyroBulbControlActive(),
+    engaged: activeControl.engaged,
+    pressure: Number(activeControl.pressure.toFixed(1)),
+    selectedTarget: activeTargetId(ensureSelectedActiveTarget()),
+    selectedTargetHost: activeControl.selectedTargetHost,
+    selectedAction: activeControl.selectedAction,
+    engagePressure: ACTIVE_CLUTCH_ON_PRESSURE,
+    releasePressure: activeClutchReleasePressure(),
     axis: gyroBulbControl.axis,
     axisMin: gyroBulbControl.axisMin,
     axisMax: gyroBulbControl.axisMax,
@@ -878,7 +1093,7 @@ function updateGyroBulbControl(nextConfig = {}) {
   }
   if (
     nextConfig.mode !== undefined &&
-    ['active', 'passive', 'always'].includes(nextConfig.mode)
+    ['fsr_hold', 'active', 'passive', 'always'].includes(nextConfig.mode)
   ) {
     gyroBulbControl.mode = nextConfig.mode;
   }
@@ -976,6 +1191,7 @@ io.on('connection', (socket) => {
   socket.emit('sensorStatus', liveSensorState);
   socket.emit('gyroBulbControl', publicGyroBulbControl());
   socket.emit('passiveMotionState', publicPassiveMotionState());
+  socket.emit('activeControlState', publicActiveControlState());
   publishMode(currentMode);
 
   socket.on('getMode', () => {
@@ -994,15 +1210,15 @@ io.on('connection', (socket) => {
     publishMode(currentMode);
     await applyModeOutputs();
 
-    if (currentMode === 'active') {
-      await kasa.setPlugPower(true);
-    }
-
     socket.emit('modeResult', { success: true, mode: currentMode });
   });
 
   socket.on('setGyroBulbControl', (config) => {
     socket.emit('gyroBulbControl', updateGyroBulbControl(config));
+  });
+
+  socket.on('getActiveControlState', () => {
+    socket.emit('activeControlState', publicActiveControlState());
   });
 
   socket.on('setPlug', async ({ state } = {}) => {
@@ -1038,7 +1254,7 @@ io.on('connection', (socket) => {
   socket.on('setPassiveColorConfig', async (config = {}) => {
     try {
       updatePassiveColorConfig(config);
-      if (currentMode === 'passive') {
+      if (!isPassiveOutputPaused()) {
         passiveMotion.lastAppliedState = null;
         await syncPassiveMotionBulb(true);
         io.emit('passiveMotionState', publicPassiveMotionState());
@@ -1061,9 +1277,7 @@ io.on('connection', (socket) => {
   socket.on('setActiveColorConfig', async (config = {}) => {
     try {
       updateActiveColorConfig(config);
-      if (currentMode === 'active') {
-        await applyModeOutputs();
-      }
+      resetGyroTrackingForActiveTarget();
 
       const kasaStatus = await kasa.getDeviceStatus();
       const payload = publicActiveColorConfig(kasaStatus);
@@ -1091,6 +1305,8 @@ app.post('/api/data', async (req, res) => {
       mode: currentMode,
       sensor: liveSensorState.latest,
       gyroBulbControl: publicGyroBulbControl(),
+      activeControl: publicActiveControlState(),
+      passiveMotion: publicPassiveMotionState(),
     });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -1104,8 +1320,10 @@ app.get('/api/status', (req, res) => {
     windowSize: accelWindow.length,
     sensor: liveSensorState,
     gyroBulbControl: publicGyroBulbControl(),
+    activeControl: publicActiveControlState(),
     passiveMotion: publicPassiveMotionState(),
     passiveColorConfig: publicPassiveColorConfig(),
+    activeColorConfig: publicActiveColorConfig(),
   });
 });
 
@@ -1129,7 +1347,12 @@ app.post('/api/mode', (req, res) => {
   void applyModeOutputs().catch((err) => {
     console.error('[Mode] HTTP output sync error:', err.message);
   });
-  res.json({ success: true, mode: currentMode, passiveMotion: publicPassiveMotionState() });
+  res.json({
+    success: true,
+    mode: currentMode,
+    activeControl: publicActiveControlState(),
+    passiveMotion: publicPassiveMotionState(),
+  });
 });
 
 app.get('/api/kasa/status', async (req, res) => {
@@ -1179,7 +1402,7 @@ app.get('/api/passive-config', async (req, res) => {
 app.post('/api/passive-config', async (req, res) => {
   try {
     updatePassiveColorConfig(req.body || {});
-    if (currentMode === 'passive') {
+    if (!isPassiveOutputPaused()) {
       passiveMotion.lastAppliedState = null;
       await syncPassiveMotionBulb(true);
       io.emit('passiveMotionState', publicPassiveMotionState());
@@ -1202,6 +1425,10 @@ app.post('/api/gyro-bulb-control', (req, res) => {
   res.json(updateGyroBulbControl(req.body || {}));
 });
 
+app.get('/api/active-control', (req, res) => {
+  res.json(publicActiveControlState());
+});
+
 // Boot
 const PORT = Number(process.env.PORT || 3001);
 server.on('error', (err) => {
@@ -1221,6 +1448,9 @@ server.listen(PORT, () => {
     `[Server] Gyro bulb   : ${
       gyroBulbControl.enabled ? 'enabled' : 'disabled'
     } (${gyroBulbControl.axis} ${gyroBulbControl.axisMin}..${gyroBulbControl.axisMax} -> 0..100%, mode=${gyroBulbControl.mode})`
+  );
+  console.log(
+    `[Server] Active clutch: hold pressure>=${ACTIVE_CLUTCH_ON_PRESSURE}, release<=${activeClutchReleasePressure()}, cooldownMs=${ACTIVE_RELEASE_COOLDOWN_MS}`
   );
   console.log(
     `[Server] Passive bulb: customizable per device (defaults still=${DEFAULT_PASSIVE_STILL_COLOR}, moving=${DEFAULT_PASSIVE_MOVING_COLOR}, window=${PASSIVE_MOTION_WINDOW_SIZE}, thresholds=${PASSIVE_MOTION_STILL_THRESHOLD}/${PASSIVE_MOTION_MOVING_THRESHOLD}, stillDelayMs=${PASSIVE_STILL_DELAY_MS})`

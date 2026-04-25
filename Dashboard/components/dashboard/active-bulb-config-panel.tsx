@@ -64,7 +64,7 @@ export function ActiveBulbConfigPanel({
           <div>
             <h2 className="font-semibold text-card-foreground">Active Lighting</h2>
             <p className="text-xs text-muted-foreground">
-              Customize the base color for Active Mode.
+              Customize the base color used while FSR hold controls brightness.
             </p>
           </div>
         </div>

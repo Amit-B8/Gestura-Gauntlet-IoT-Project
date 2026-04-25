@@ -34,13 +34,66 @@ interface ActiveColorConfigPayload {
   };
 }
 
+interface SensorData {
+  x: number;
+  y: number;
+  z: number;
+  gx: number;
+  gy: number;
+  gz: number;
+  pressure: number;
+}
+
+interface PassiveMotionState {
+  state: string;
+  score: number;
+  rawMotionScore: number;
+  lastAppliedState: string;
+  lastColor: string;
+  movementAgeMs: number | null;
+  sensorAgeMs: number | null;
+  stillDelayMs: number;
+  commandInFlight: boolean;
+  pendingState: string;
+}
+
+interface ActiveControlState {
+  engaged: boolean;
+  pressure: number;
+  selectedTarget: string | null;
+  selectedTargetHost: string | null;
+  selectedAction: string;
+  inputSource: string;
+  cycleInputSource: string;
+  engagePressure: number;
+  releasePressure: number;
+  releaseCooldownMs: number;
+  releaseCooldownRemainingMs: number;
+  passiveOutputPaused: boolean;
+  lastEngagedAt: string | null;
+  lastReleasedAt: string | null;
+  lastShortTapAt: string | null;
+}
+
+const emptySensorData: SensorData = {
+  x: 0,
+  y: 0,
+  z: 0,
+  gx: 0,
+  gy: 0,
+  gz: 0,
+  pressure: 0,
+};
+
 export default function Dashboard() {
   // Changed from picoIp to brokerUrl (pointing to your Node.js server)
   const [brokerUrl, setBrokerUrl] = useState("http://localhost:3001");
   const [networkStatus, setNetworkStatus] = useState<"connected" | "disconnected" | "unknown">("unknown");
   const [activeMode, setActiveMode] = useState<"active" | "passive" | null>("passive");
   const [isSimulating, setIsSimulating] = useState(false);
-  const [sensorData, setSensorData] = useState({ x: 0, y: 0, z: 0, gx: 0, gy: 0, gz: 0 });
+  const [sensorData, setSensorData] = useState<SensorData>(emptySensorData);
+  const [passiveMotion, setPassiveMotion] = useState<PassiveMotionState | null>(null);
+  const [activeControl, setActiveControl] = useState<ActiveControlState | null>(null);
   
   const [passiveBulbs, setPassiveBulbs] = useState<PassiveBulbConfigDevice[]>([]);
   const [passiveConfigError, setPassiveConfigError] = useState<string | null>(null);
@@ -60,6 +113,7 @@ export default function Dashboard() {
       socket.emit("getMode");
       socket.emit("getPassiveColorConfig");
       socket.emit("getActiveColorConfig");
+      socket.emit("getActiveControlState");
     });
 
     socket.on("disconnect", () => {
@@ -75,7 +129,7 @@ export default function Dashboard() {
     });
 
     // Firehose of data from the Pico
-    socket.on("sensorData", (data: { x: number; y: number; z: number; gx?: number; gy?: number; gz?: number; }) => {
+    socket.on("sensorData", (data: Partial<SensorData>) => {
       // Only use live data if we aren't using the local UI simulator
       if (!isSimulating) {
         setSensorData({
@@ -85,8 +139,17 @@ export default function Dashboard() {
           gx: data.gx || 0,
           gy: data.gy || 0,
           gz: data.gz || 0,
+          pressure: data.pressure || 0,
         });
       }
+    });
+
+    socket.on("passiveMotionState", (state: PassiveMotionState) => {
+      setPassiveMotion(state);
+    });
+
+    socket.on("activeControlState", (state: ActiveControlState) => {
+      setActiveControl(state);
     });
 
     socket.on("passiveColorConfig", (config: PassiveColorConfigPayload) => {
@@ -131,6 +194,7 @@ export default function Dashboard() {
       socket.emit("getMode");
       socket.emit("getPassiveColorConfig");
       socket.emit("getActiveColorConfig");
+      socket.emit("getActiveControlState");
     }
   };
 
@@ -213,6 +277,7 @@ export default function Dashboard() {
           gx: parseFloat((Math.random() * 250 - 125).toFixed(3)),
           gy: parseFloat((Math.random() * 250 - 125).toFixed(3)),
           gz: parseFloat((Math.random() * 250 - 125).toFixed(3)),
+          pressure: parseFloat((Math.random() * 100).toFixed(1)),
         });
       }, 500);
     }
@@ -261,6 +326,8 @@ export default function Dashboard() {
           <div className="lg:col-span-2">
             <SystemStatusPanel
               activeMode={activeMode}
+              activeControl={activeControl}
+              passiveMotion={passiveMotion}
               onModeChange={handleModeChange}
               onRefresh={handleRefresh}
             />
@@ -296,32 +363,28 @@ export default function Dashboard() {
               <div className="flex items-center justify-between text-sm">
                 <span className="text-muted-foreground">Mode</span>
                 <span className="font-medium text-foreground capitalize">
-                  {activeMode || "Not Set"}
+                  {activeControl?.engaged ? "Active hold" : "Passive baseline"}
                 </span>
               </div>
             </div>
           </div>
 
           <div className="lg:col-span-3">
-            <div className="grid gap-6">
-              {activeMode === "passive" && (
-                <PassiveBulbConfigPanel
-                  devices={passiveBulbs}
-                  error={passiveConfigError}
-                  isSavingHost={savingPassiveHost}
-                  onRefresh={handleRefresh}
-                  onSave={handlePassiveColorSave}
-                />
-              )}
-              {activeMode === "active" && (
-                <ActiveBulbConfigPanel
-                  devices={activeBulbs}
-                  error={activeConfigError}
-                  isSavingHost={savingActiveHost}
-                  onRefresh={handleRefresh}
-                  onSave={handleActiveColorSave}
-                />
-              )}
+            <div className="grid gap-6 xl:grid-cols-2">
+              <PassiveBulbConfigPanel
+                devices={passiveBulbs}
+                error={passiveConfigError}
+                isSavingHost={savingPassiveHost}
+                onRefresh={handleRefresh}
+                onSave={handlePassiveColorSave}
+              />
+              <ActiveBulbConfigPanel
+                devices={activeBulbs}
+                error={activeConfigError}
+                isSavingHost={savingActiveHost}
+                onRefresh={handleRefresh}
+                onSave={handleActiveColorSave}
+              />
             </div>
           </div>
 
@@ -346,4 +409,3 @@ export default function Dashboard() {
     </div>
   );
 }
-
