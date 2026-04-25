@@ -15,10 +15,10 @@ BULB_IPS=192.168.1.101,192.168.1.102
 KASA_TIMEOUT_MS=4000
 
 # Live X-axis to Kasa bulb brightness control
-# Default maps accelerometer x=-1 to 0% and x=+1 to 100% while mode is active.
+# Default maps accelerometer x=-1 to 0% and x=+1 to 100% while the FSR is held.
 # If you want gyro rate instead of tilt, set GYRO_BULB_AXIS=gx and tune min/max.
 GYRO_BULB_CONTROL_ENABLED=true
-GYRO_BULB_CONTROL_MODE=active
+GYRO_BULB_CONTROL_MODE=fsr_hold
 GYRO_BULB_AXIS=x
 GYRO_BULB_AXIS_MIN=-1
 GYRO_BULB_AXIS_MAX=1
@@ -27,6 +27,15 @@ GYRO_BULB_MIN_DELTA=1
 GYRO_BULB_SMOOTHING=0.6
 GYRO_BULB_TRANSITION_MS=80
 GYRO_BULB_POWER_OFF_AT_ZERO=true
+
+# Active FSR clutch behavior
+# Short tap cycles the selected bulb; hold controls the selected bulb brightness.
+ACTIVE_CLUTCH_ON_PRESSURE=20
+ACTIVE_CLUTCH_OFF_PRESSURE=12
+ACTIVE_RELEASE_COOLDOWN_MS=3000
+ACTIVE_HOLD_MIN_MS=250
+ACTIVE_SHORT_TAP_MAX_MS=350
+ACTIVE_SHORT_TAP_RELEASE_PRESSURE=8
 
 # Passive mode bulb behavior
 # Colors can be overridden per bulb from the dashboard.

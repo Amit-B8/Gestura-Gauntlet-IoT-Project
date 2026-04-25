@@ -179,19 +179,9 @@ async def main():
             print("OLED not detected, running headless.")
         global_gui = GauntletGUI(i2c, state_store, enabled=oled_present)
 
-        # --- FSR Event Handlers ---
-        def on_fsr_double_press():
-            current_mode = state_store.get("mode")
-            new_mode = "ACTIVE" if current_mode == "PASSIVE" else "PASSIVE"
-            global_gui.update_state(mode=new_mode)
-            print(f"!!! FSR DOUBLE PRESS: Toggling mode to {new_mode} !!!")
-            if mqtt_client:
-                try:
-                    mqtt_client.publish(b"gauntlet/mode", new_mode.encode())
-                except Exception as e:
-                    print(f"MQTT FSR Publish Error: {e}")
-
-        fsr.subscribe(FSR.EVENT_HARD_DOUBLE_PRESS, on_fsr_double_press)
+        # Active control is derived from continuous FSR pressure in the backend.
+        # Do not publish mode changes from FSR events; short taps are interpreted
+        # by the backend as target cycling and holds as active control.
         
     except Exception as e:
         trigger_hardware_panic(str(e))
