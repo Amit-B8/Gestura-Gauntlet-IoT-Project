@@ -67,6 +67,7 @@ services:
       DATABASE_URL: postgres://gestura:gestura_dev_password@postgres:5432/gestura
       DATABASE_SSL: "false"
       SESSION_SECRET: example-dashboard-session-secret-change-me
+      CORS_ORIGINS: http://localhost:3000,http://127.0.1:3000
       DASHBOARD_USERNAME: admin
       DASHBOARD_PASSWORD_HASH: scrypt$$REPLACE$$ME
       NODE_SHARED_TOKEN: example-node-shared-token

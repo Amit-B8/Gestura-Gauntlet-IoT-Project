@@ -29,6 +29,9 @@ INFLUXDB_TOKEN=replace-with-influx-token
 INFLUXDB_ORG=gestura
 INFLUXDB_BUCKET=gestura_metrics
 
+# CORS configuration - Comma seperated values
+CORS_ORIGINS=http://localhost:3000
+
 # Node-agent process examples:
 # CENTRAL_API_URL=http://localhost:3001
 # CENTRAL_WS_URL=http://localhost:3001

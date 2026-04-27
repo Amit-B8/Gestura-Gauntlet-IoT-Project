@@ -40,12 +40,20 @@ try {
 
 const app = express();
 
-const allowedOrigins = [
-  'http://localhost:3000',
-  'http://127.0.0.1:3000',
-  'http://localhost:8080',
-  'http://127.0.0.1:8080',
-];
+const allowedOrigins = (process.env.CORS_ORIGINS || "")
+  .split(",")
+  .map(o => o.trim())
+  .filter(Boolean);
+
+// optional: add dev defaults
+if (process.env.NODE_ENV !== "production") {
+  allowedOrigins.push(
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:8080",
+    "http://127.0.0.1:8080"
+  );
+}
 
 app.use(cors({
   origin(origin, callback) {
