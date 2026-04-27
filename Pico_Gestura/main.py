@@ -1,4 +1,5 @@
 import machine
+import network
 import uasyncio as asyncio
 import time
 import ujson
@@ -18,6 +19,7 @@ WIFI_PASS = env.get("WIFI_PASS")
 GLOVE_WS_URL = env.get("GLOVE_WS_URL", "ws://localhost:3001/glove")
 GLOVE_ID = env.get("GLOVE_ID", "primary_glove")
 PICO_API_TOKEN = env.get("PICO_API_TOKEN", "")
+METRICS_INTERVAL_SEC = int(env.get("METRIC_INTERVAL_SEC", "300"))
 
 led = machine.Pin("LED", machine.Pin.OUT)
 global_gui = None
@@ -42,6 +44,10 @@ async def network_task(gui, store):
     reconnect_delay_ms = 500
     max_delay_ms = 5000
     transport = None
+    messages_sent = 0
+    messages_failed = 0
+    last_metrics_ms = 0
+    pending_metrics_sent_at = None
 
     while True:
         try:
@@ -58,6 +64,7 @@ async def network_task(gui, store):
             reconnect_delay_ms = 500
         except Exception as e:
             print("WebSocket connection failed:", e)
+            messages_failed += 1
             store.update(connected=False, transport=None)
             gui.update_state(connected=False)
             await asyncio.sleep_ms(reconnect_delay_ms)
@@ -68,6 +75,9 @@ async def network_task(gui, store):
             try:
                 incoming = transport.receive_json(timeout=0.01)
                 if incoming:
+                    if incoming.get("type") == "passive_metrics_ack" and pending_metrics_sent_at is not None:
+                        store.update(rtt_ms=time.ticks_diff(time.ticks_ms(), pending_metrics_sent_at))
+                        pending_metrics_sent_at = None
                     handle_server_message(incoming, gui, store)
 
                 state = store.snapshot()
@@ -85,8 +95,27 @@ async def network_task(gui, store):
                     "pressure": state.get("pressure", 0.0),
                 }
                 transport.send_json(payload)
+                messages_sent += 1
+
+                current_ms = time.ticks_ms()
+                if time.ticks_diff(current_ms, last_metrics_ms) >= METRICS_INTERVAL_SEC * 1000:
+                    metric_payload = build_device_metrics(
+                        state,
+                        messages_sent,
+                        messages_failed,
+                    )
+                    pending_metrics_sent_at = current_ms
+                    transport.send_json({
+                        "type": "passive_metrics",
+                        "gloveId": GLOVE_ID,
+                        "ts": current_ms,
+                        "metrics": [metric_payload],
+                    })
+                    messages_sent += 1
+                    last_metrics_ms = current_ms
             except Exception as e:
                 print("WebSocket error:", e)
+                messages_failed += 1
                 gui.update_state(connected=False)
                 store.update(connected=False, transport=None)
                 try:
@@ -96,6 +125,30 @@ async def network_task(gui, store):
                 break
 
             await asyncio.sleep_ms(20)
+
+
+def build_device_metrics(state, messages_sent, messages_failed):
+    return {
+        "type": "glove_status",
+        "wifi_rssi": get_wifi_rssi(),
+        "uptime_sec": time.ticks_ms() // 1000,
+        "mode": str(state.get("mode", "PASSIVE")).lower(),
+        "selected_device_id": state.get("selected_device_id", ""),
+        "selected_action": state.get("selected_action", state.get("action", "")),
+        "rtt_ms": state.get("rtt_ms", 0),
+        "messages_sent": messages_sent,
+        "messages_failed": messages_failed,
+    }
+
+
+def get_wifi_rssi():
+    try:
+        wlan = network.WLAN(network.STA_IF)
+        if hasattr(wlan, "status"):
+            return wlan.status("rssi")
+    except Exception:
+        pass
+    return None
 
 
 def handle_server_message(message, gui, store):
