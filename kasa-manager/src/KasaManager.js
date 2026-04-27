@@ -209,6 +209,22 @@ class KasaManager {
     };
   }
 
+  async clearStorage() {
+    this.client.stopDiscovery();
+    this.client.devices?.clear?.();
+    this.rawDevices.clear();
+    this.managedDevices.clear();
+    this.queues.clear();
+    this.lastDiscoveryAt = new Date().toISOString();
+    this.lastDiscoveryStartedAt = null;
+    this.lastDiscoveryErrors = [];
+    return {
+      ok: true,
+      managerId: this.id,
+      cleared: true,
+    };
+  }
+
   async shutdown() {
     if (this.scanInterval) clearInterval(this.scanInterval);
     this.client.stopDiscovery();

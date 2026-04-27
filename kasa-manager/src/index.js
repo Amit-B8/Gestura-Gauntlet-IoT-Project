@@ -32,46 +32,78 @@ async function main() {
     interfaces: managerInterfacesFromEnv(),
   });
 
-const socket = io(nodeAgentUrl, {
-  transports: ['websocket', 'polling'],
-  autoUnref: false,
-  reconnection: true,
-});
-
-socket.on('connect', async () => {
-  console.log(`[KasaManager] connected to node agent as socket ${socket.id}`);
-
-  try {
-    const devices = await manager.listDevices();
-    socket.emit('manager:attach', {
-      token: process.env.MANAGER_TOKEN,
-      info: manager.getInfo(),
-      devices,
-    },
-    (ack) => {
-      debugLog("[SimManager] manager:attach ack:", ack);
-    }
-  );
-  } catch (err) {
-    console.error('[KasaManager] attach failed:', err.message);
-  }
-});
-
-socket.on('connect_error', (err) => {
-  console.error('[KasaManager] node agent connection error:', err.message);
-});
-
-socket.on('disconnect', (reason) => {
-  console.warn('[KasaManager] disconnected from node agent:', reason);
-});
-
-setInterval(() => {
-  socket.emit('manager:heartbeat', {
-    managerId: manager.getInfo().id,
-    health: 'ok',
-    ts: Date.now(),
+  const socket = io(nodeAgentUrl, {
+    transports: ['websocket', 'polling'],
+    autoUnref: false,
+    reconnection: true,
+    reconnectionAttempts: Infinity,
+    reconnectionDelay: 1000,
+    reconnectionDelayMax: 10_000,
+    timeout: 5000,
   });
-}, Number(process.env.MANAGER_HEARTBEAT_MS || 10_000));
+
+  let attachTimer = null;
+
+  const scheduleAttach = (delayMs = 0) => {
+    if (attachTimer) clearTimeout(attachTimer);
+    attachTimer = setTimeout(() => {
+      attachTimer = null;
+      void attachToNodeAgent();
+    }, delayMs);
+    attachTimer.unref?.();
+  };
+
+  const attachToNodeAgent = async () => {
+    if (!socket.connected) return;
+
+    try {
+      const devices = await manager.listDevices();
+      socket.timeout(5000).emit('manager:attach', {
+        token: process.env.MANAGER_TOKEN,
+        info: manager.getInfo(),
+        devices,
+      },
+      (err, ack) => {
+        if (err || ack?.ok === false) {
+          console.error(
+            '[KasaManager] attach failed:',
+            err?.message || ack?.error || ack?.message || 'No acknowledgement',
+          );
+          scheduleAttach(Number(process.env.MANAGER_ATTACH_RETRY_MS || 5000));
+          return;
+        }
+
+        debugLog('[KasaManager] manager:attach ack:', ack);
+      });
+    } catch (err) {
+      console.error('[KasaManager] attach preparation failed:', err.message);
+      scheduleAttach(Number(process.env.MANAGER_ATTACH_RETRY_MS || 5000));
+    }
+  };
+
+  socket.on('connect', () => {
+    console.log(`[KasaManager] connected to node agent as socket ${socket.id}`);
+    scheduleAttach();
+  });
+
+  socket.on('connect_error', (err) => {
+    console.error('[KasaManager] node agent connection error:', err.message);
+  });
+
+  socket.on('disconnect', (reason) => {
+    if (attachTimer) clearTimeout(attachTimer);
+    console.warn('[KasaManager] disconnected from node agent:', reason);
+  });
+
+  const heartbeat = setInterval(() => {
+    if (!socket.connected) return;
+    socket.emit('manager:heartbeat', {
+      managerId: manager.getInfo().id,
+      health: 'ok',
+      ts: Date.now(),
+    });
+  }, Number(process.env.MANAGER_HEARTBEAT_MS || 10_000));
+  heartbeat.unref?.();
 
   socket.on('manager:listDevices', async (_payload, ack) => {
     try {
@@ -133,6 +165,32 @@ setInterval(() => {
         capabilityId: payload?.action?.capabilityId,
         message: err.message || 'Failed to execute action',
       });
+    }
+  });
+
+  socket.on('manager:discover', async (_payload, ack) => {
+    try {
+      const result = await manager.discover();
+      socket.emit('manager:inventory', {
+        managerId: manager.getInfo().id,
+        devices: await manager.listDevices(),
+      });
+      ack?.({ ok: true, data: result });
+    } catch (err) {
+      ack?.({ ok: false, error: err.message || 'Failed to discover devices' });
+    }
+  });
+
+  socket.on('manager:clearStorage', async (_payload, ack) => {
+    try {
+      const result = await manager.clearStorage();
+      socket.emit('manager:inventory', {
+        managerId: manager.getInfo().id,
+        devices: [],
+      });
+      ack?.({ ok: true, data: result });
+    } catch (err) {
+      ack?.({ ok: false, error: err.message || 'Failed to clear storage' });
     }
   });
 
