@@ -75,6 +75,9 @@ function registerNodeAgentSocket(io, services) {
         integrationType: 'node',
       });
       const devices = enrichDevices(payload.devices || [], info, nodeId);
+      if (payload.clear === true) {
+        await services.deviceRegistry.clearManagerDevices(info.id);
+      }
       await services.deviceRegistry.upsertMany(devices);
       await services.persistence?.saveDevicesForManager?.(info.id, devices);
       services.nodeRegistry.attachManager(nodeId, info.id);
@@ -85,10 +88,22 @@ function registerNodeAgentSocket(io, services) {
 
     socket.on('devices:sync', async (payload = {}, ack) => {
       const manager = services.managerService.get(payload.managerId);
-      const info = manager?.getInfo?.() || { id: payload.managerId, nodeId };
-      const devices = enrichDevices(payload.devices || [], info, info.nodeId || payload.nodeId);
-      await services.deviceRegistry.upsertMany(devices);
-      await services.persistence?.saveDevicesForManager?.(info.id, devices);
+      const nodeId = payload.nodeId || currentNodeId;
+      const info = manager?.getInfo?.() || {
+        id: payload.managerId,
+        nodeId,
+        kind: payload.managerKind || 'custom',
+        metadata: {},
+        interfaces: [],
+      };
+      const devices = enrichDevices(payload.devices || [], info, info.nodeId || nodeId);
+      if (payload.clear === true) {
+        await services.deviceRegistry.clearManagerDevices(info.id);
+      } else {
+        await services.deviceRegistry.upsertMany(devices);
+        services.deviceRegistry.markOfflineMissing(info.id, new Set(devices.map((device) => device.id)));
+        await services.persistence?.saveDevicesForManager?.(info.id, devices);
+      }
       ack?.({ ok: true, count: devices.length });
       io.emit('devices', services.deviceRegistry.getAll());
     });
@@ -187,6 +202,14 @@ function createNodeSocketManager({ socket, info }) {
 
     async executeAction(action) {
       return emitWithAck(socket, 'manager:executeAction', { managerId: info.id, action });
+    },
+
+    async discover() {
+      return emitWithAck(socket, 'manager:discover', { managerId: info.id });
+    },
+
+    async clearStorage() {
+      return emitWithAck(socket, 'manager:clearStorage', { managerId: info.id });
     },
   };
 }

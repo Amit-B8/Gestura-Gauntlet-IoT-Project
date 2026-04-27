@@ -28,6 +28,14 @@ class AttachedManager {
   async executeAction(action) {
     return emitWithAck(this.socket, 'manager:executeAction', { managerId: this.info.id, action });
   }
+
+  async discover() {
+    return emitWithAck(this.socket, 'manager:discover', { managerId: this.info.id });
+  }
+
+  async clearStorage() {
+    return emitWithAck(this.socket, 'manager:clearStorage', { managerId: this.info.id });
+  }
 }
 
 function emitWithAck(socket, event, payload) {

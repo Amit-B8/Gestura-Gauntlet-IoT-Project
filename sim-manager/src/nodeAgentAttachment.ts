@@ -50,10 +50,19 @@ export function attachSimulatorToNodeAgent(store: DeviceStore) {
   });
 
   let managerId: string | null = null;
+  let attachTimer: NodeJS.Timeout | null = null;
 
-  socket.on("connect", async () => {
-    debugLog("[SimManager] Socket connected to Node Agent");
-    debugLog("[SimManager] socket.id =", socket.id);
+  const scheduleAttach = (delayMs = 0) => {
+    if (attachTimer) clearTimeout(attachTimer);
+    attachTimer = setTimeout(() => {
+      attachTimer = null;
+      void attachToNodeAgent();
+    }, delayMs);
+    (attachTimer as unknown as { unref?: () => void }).unref?.();
+  };
+
+  const attachToNodeAgent = async () => {
+    if (!socket.connected) return;
 
     try {
       const info = await store.getManagerInfo();
@@ -62,14 +71,23 @@ export function attachSimulatorToNodeAgent(store: DeviceStore) {
 
       debugLog("[SimManager] Attaching manager:", info);
 
-      socket.emit(
+      socket.timeout(5000).emit(
         "manager:attach",
         {
           token: process.env.MANAGER_TOKEN,
           info,
           devices,
         },
-        (ack: unknown) => {
+        (err: Error | null, ack: any) => {
+          if (err || ack?.ok === false) {
+            console.error(
+              "[SimManager] attach failed:",
+              err?.message || ack?.error || ack?.message || "Node agent rejected attach",
+            );
+            scheduleAttach(Number(process.env.MANAGER_ATTACH_RETRY_MS || 5000));
+            return;
+          }
+
           debugLog("[SimManager] manager:attach ack:", ack);
         },
       );
@@ -84,7 +102,14 @@ export function attachSimulatorToNodeAgent(store: DeviceStore) {
         simulatorApiUrl: store.simulatorApiUrl,
         ts: Date.now(),
       });
+      scheduleAttach(Number(process.env.MANAGER_ATTACH_RETRY_MS || 5000));
     }
+  };
+
+  socket.on("connect", async () => {
+    debugLog("[SimManager] Socket connected to Node Agent");
+    debugLog("[SimManager] socket.id =", socket.id);
+    scheduleAttach();
   });
 
   socket.on("connect_error", (error: Error) => {
@@ -92,6 +117,7 @@ export function attachSimulatorToNodeAgent(store: DeviceStore) {
   });
 
   socket.on("disconnect", (reason: string) => {
+    if (attachTimer) clearTimeout(attachTimer);
     debugWarn("[SimManager] disconnected from Node Agent:", reason);
   });
 
@@ -201,6 +227,56 @@ export function attachSimulatorToNodeAgent(store: DeviceStore) {
       }
     },
   );
+
+  socket.on("manager:discover", async (_payload: unknown, ack?: Function) => {
+    try {
+      const devices = await store.listDevices();
+      if (managerId) {
+        socket.emit("manager:inventory", {
+          managerId,
+          devices,
+        });
+      }
+      ack?.({
+        ok: true,
+        data: {
+          ok: true,
+          managerId,
+          discovered: devices.length,
+        },
+      });
+    } catch (error) {
+      ack?.({
+        ok: false,
+        error: error instanceof Error ? error.message : "Discovery failed",
+      });
+    }
+  });
+
+  socket.on("manager:clearStorage", async (_payload: unknown, ack?: Function) => {
+    try {
+      if (managerId) {
+        socket.emit("manager:inventory", {
+          managerId,
+          devices: [],
+        });
+      }
+      ack?.({
+        ok: true,
+        data: {
+          ok: true,
+          managerId,
+          cleared: true,
+          reinitialized: true,
+        },
+      });
+    } catch (error) {
+      ack?.({
+        ok: false,
+        error: error instanceof Error ? error.message : "Clear storage failed",
+      });
+    }
+  });
 
   return socket;
 }

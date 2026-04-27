@@ -29,6 +29,9 @@ class NodeAgent {
     this.cache = cache;
     this.telemetry = new TelemetryBuffer({ nodeId: node.id });
     this.socket = null;
+    this.centralRegistered = false;
+    this.pendingManagerSyncs = new Map();
+    this.pendingManagerStatuses = new Map();
     this.heartbeatInterval = null;
     this.managerAttachmentServer = new ManagerAttachmentServer({
       port: managerAttachPort,
@@ -64,6 +67,7 @@ class NodeAgent {
     });
 
     this.socket.on('disconnect', (reason) => {
+      this.centralRegistered = false;
       console.warn('[NodeAgent] central disconnected:', reason);
     });
     this.socket.on('manager:listDevices', (payload, ack) => this.handleManagerCall(payload, ack, 'listDevices'));
@@ -72,6 +76,12 @@ class NodeAgent {
     );
     this.socket.on('manager:executeAction', (payload, ack) =>
       this.handleManagerCall(payload, ack, 'executeAction', payload.action)
+    );
+    this.socket.on('manager:discover', (payload, ack) =>
+      this.handleManagerCall(payload, ack, 'discover')
+    );
+    this.socket.on('manager:clearStorage', (payload, ack) =>
+      this.handleManagerCall(payload, ack, 'clearStorage')
     );
 
     this.telemetry.start((events) => this.emitWithAck('telemetry:batch', { events }));
@@ -98,6 +108,11 @@ class NodeAgent {
     
     this.socket.emit('node:register', { ...this.node, managerIds }, async (response) => {
       debug('node:register response', response);
+      if (response?.ok === false) {
+        console.error('[NodeAgent] central rejected node registration:', response.error || response.message);
+        return;
+      }
+      this.centralRegistered = true;
       if (response?.config) this.cache.setConfigSnapshot(response.config);
       this.telemetry.record({
         eventType: 'node_registered',
@@ -106,6 +121,7 @@ class NodeAgent {
       for (const manager of this.managers.values()) {
         await this.registerManager(manager);
       }
+      this.flushPendingCentralUpdates();
     });
   }
 
@@ -113,15 +129,24 @@ class NodeAgent {
     const info = manager.getInfo();
     const devices = await manager.listDevices().catch(() => []);
     this.cache.setManagerDevices(info.id, devices);
+    this.pendingManagerSyncs.set(info.id, { info, devices });
     this.telemetry.record({
       eventType: 'manager_registered',
       managerId: info.id,
       payload: { info, deviceCount: devices.length },
     });
+    if (!this.canSendToCentral()) return;
+
     this.socket.emit('manager:register', {
       nodeId: this.node.id,
       info: { ...info, nodeId: this.node.id, integrationType: 'node' },
       devices,
+    }, (response) => {
+      if (response?.ok === false) {
+        console.error(`[NodeAgent] central rejected manager ${info.id}:`, response.error || response.message);
+        return;
+      }
+      this.pendingManagerSyncs.delete(info.id);
     });
   }
 
@@ -135,6 +160,12 @@ class NodeAgent {
     try {
       const startedAt = Date.now();
       const data = await manager[method](argument);
+      if (method === 'discover') {
+        const refreshedDevices = await manager.listDevices();
+        await this.updateManagerInventory(payload.managerId, refreshedDevices);
+      } else if (method === 'clearStorage') {
+        await this.updateManagerInventory(payload.managerId, [], { clear: true });
+      }
       if (method === 'executeAction') {
         this.telemetry.record({
           eventType: 'route_attempt',
@@ -183,41 +214,89 @@ class NodeAgent {
     if (!managerId) return;
     this.managerSocketIds.delete(socketId);
     this.managers.delete(managerId);
+    this.pendingManagerSyncs.delete(managerId);
     this.telemetry.record({
       eventType: 'manager_disconnected',
       managerId,
       payload: { managerId },
     });
-    this.socket?.emit('manager:status', {
-      nodeId: this.node.id,
-      managerId,
+    void this.updateManagerHealth(managerId, {
       online: false,
       health: 'disconnected',
       ts: Date.now(),
     });
   }
 
-  async updateManagerInventory(managerId, devices = []) {
+  async updateManagerInventory(managerId, devices = [], options = {}) {
     this.cache.setManagerDevices(managerId, devices);
+    const manager = this.managers.get(managerId);
+    const info = manager?.getInfo?.() || { id: managerId, nodeId: this.node.id };
+    this.pendingManagerSyncs.set(managerId, { info, devices, clear: Boolean(options.clear) });
     this.telemetry.record({
       eventType: 'manager_inventory',
       managerId,
       payload: { managerId, deviceCount: devices.length },
     });
-    this.socket?.emit('devices:sync', { nodeId: this.node.id, managerId, devices });
+    if (!this.canSendToCentral()) return;
+
+    this.socket.emit('devices:sync', {
+      nodeId: this.node.id,
+      managerId,
+      devices,
+      clear: Boolean(options.clear),
+    }, (response) => {
+      if (response?.ok === false) {
+        console.error(`[NodeAgent] central rejected inventory for ${managerId}:`, response.error || response.message);
+        return;
+      }
+      this.pendingManagerSyncs.delete(managerId);
+    });
   }
 
   async updateManagerHealth(managerId, health) {
+    this.pendingManagerStatuses.set(managerId, health);
     this.telemetry.record({
       eventType: 'manager_heartbeat',
       managerId,
       payload: { managerId, ...health },
     });
-    this.socket?.emit('manager:status', {
+    if (!this.canSendToCentral()) return;
+
+    this.socket.emit('manager:status', {
       nodeId: this.node.id,
       managerId,
       ...health,
+    }, (response) => {
+      if (response?.ok === false) return;
+      this.pendingManagerStatuses.delete(managerId);
     });
+  }
+
+  canSendToCentral() {
+    return Boolean(this.socket?.connected && this.centralRegistered);
+  }
+
+  flushPendingCentralUpdates() {
+    if (!this.canSendToCentral()) return;
+
+    for (const { info, devices, clear } of this.pendingManagerSyncs.values()) {
+      this.socket.emit('manager:register', {
+        nodeId: this.node.id,
+        info: { ...info, nodeId: this.node.id, integrationType: 'node' },
+        devices,
+        clear: Boolean(clear),
+      }, (response) => {
+        if (response?.ok === false) {
+          console.error(`[NodeAgent] central rejected manager ${info.id}:`, response.error || response.message);
+          return;
+        }
+        this.pendingManagerSyncs.delete(info.id);
+      });
+    }
+
+    for (const [managerId, health] of this.pendingManagerStatuses.entries()) {
+      this.updateManagerHealth(managerId, health);
+    }
   }
 
   emitWithAck(event, payload) {

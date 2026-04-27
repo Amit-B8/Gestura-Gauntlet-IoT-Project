@@ -40,6 +40,20 @@ function createExternalManager({ info, baseUrl, authToken }) {
         }
       );
     },
+
+    async discover() {
+      return fetchJson(`${baseUrl}/api/manager/discover`, {
+        method: 'POST',
+        headers,
+      });
+    },
+
+    async clearStorage() {
+      return fetchJson(`${baseUrl}/api/manager/clear-storage`, {
+        method: 'POST',
+        headers,
+      });
+    },
   };
 }
 

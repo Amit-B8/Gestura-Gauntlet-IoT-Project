@@ -1,6 +1,6 @@
 const express = require('express');
 
-function createManagersRouter({ managerService, deviceRegistry, deviceSyncService }) {
+function createManagersRouter({ managerService, deviceRegistry, deviceSyncService, mappingService }) {
   const router = express.Router();
 
   router.get('/', (req, res) => {
@@ -52,6 +52,35 @@ function createManagersRouter({ managerService, deviceRegistry, deviceSyncServic
     }
 
     res.json(await deviceSyncService.syncManager(req.params.managerId));
+  });
+
+  router.post('/:managerId/clear-storage', async (req, res) => {
+    const manager = managerService.get(req.params.managerId);
+    if (!manager) {
+      res.status(404).json({ error: 'Manager not found' });
+      return;
+    }
+
+    const existingDevices = deviceRegistry.getByManager(req.params.managerId);
+
+    for (const device of existingDevices) {
+      await mappingService?.replaceForDevice?.(device.id, []);
+    }
+
+    await deviceRegistry.clearManagerDevices(req.params.managerId);
+
+    let clearResult = null;
+    if (typeof manager.clearStorage === 'function') {
+      clearResult = await manager.clearStorage();
+    }
+
+    res.json({
+      ok: true,
+      managerId: req.params.managerId,
+      clearedDeviceCount: existingDevices.length,
+      clearResult,
+      devices: [],
+    });
   });
 
   return router;
