@@ -26,8 +26,14 @@ class RuntimeApp:
         self.metric_interval_sec = max(15, int(env.get("METRIC_INTERVAL_SEC", "300")))
         self.action_send_interval_ms = int(env.get("ACTION_SEND_INTERVAL_MS", "250"))
         self.ws_heartbeat_ms = int(env.get("WS_HEARTBEAT_MS", "20000"))
+        self.ws_first_heartbeat_delay_ms = int(env.get("WS_FIRST_HEARTBEAT_DELAY_MS", "30000"))
+        self.ws_offline_timeout_ms = int(env.get("WS_OFFLINE_TIMEOUT_MS", "90000"))
         self.ws_send_cooldown_ms = int(env.get("WS_SEND_COOLDOWN_MS", "1500"))
         self.ws_failed_send_cooldown_ms = int(env.get("WS_FAILED_SEND_COOLDOWN_MS", "5000"))
+        self.ws_soak_test = env_bool(env.get("WS_SOAK_TEST", "false"))
+        self.passive_metrics_enabled = (not self.ws_soak_test) and env_bool(env.get("PASSIVE_METRICS_ENABLED", "false"))
+        if self.ws_soak_test:
+            self.ws_heartbeat_ms = max(self.ws_heartbeat_ms, 30000)
         self.action_ack_timeout_ms = int(env.get("ACTION_ACK_TIMEOUT_MS", "5000"))
         self.endpoint_cache_path = env.get("ENDPOINT_CACHE_PATH", "endpoint_cache.json")
         self.ca_der_path = env.get("CA_DER_PATH", "")
@@ -75,6 +81,10 @@ class RuntimeApp:
         self.ws_send_in_progress = False
         self.last_ws_send_failed_ms = 0
         self.last_successful_ws_send_ms = 0
+        self.last_rx_ms = 0
+        self.last_tx_ms = 0
+        self.last_pong_ms = 0
+        self.ws_connected_at_ms = 0
         self.last_action_values = {}
         self.action_seq = 0
         self.pending_action_acks = {}
@@ -106,6 +116,10 @@ class RuntimeApp:
                     self.active_endpoint = None
                 self.state.mark_dirty()
         for action in self.navigation.pop_pending_actions():
+            if self.ws_soak_test:
+                if self.action_debug.enabled():
+                    print("[DEBUG][action] skipped reason=ws_soak_test")
+                continue
             if self.action_debug.enabled():
                 print("[DEBUG][action] dequeued {}".format(safe_json(action)))
             self.send_action(action)
@@ -148,7 +162,7 @@ class RuntimeApp:
         try:
             if self.action_debug.enabled():
                 print("[DEBUG][action] payload {}".format(safe_json(payload)))
-            self.send_ws_json(payload, "action")
+            self.send_ws_json(payload, "mapped_action")
             self.pending_action_acks[action_id] = {
                 "sent_at": time.ticks_ms(),
                 "action": action,
@@ -191,6 +205,7 @@ class RuntimeApp:
         last_action_ms = 0
         last_config_refresh_ms = 0
         last_heartbeat_ms = 0
+        last_soak_log_ms = 0
         pending_metrics_sent_at = None
 
         while True:
@@ -212,6 +227,8 @@ class RuntimeApp:
                     ))
                 self.transport = SimpleWebSocketClient(ws_url, ca_der_path=self.ca_der_path)
                 self.transport.connect()
+                self.ws_connected_at_ms = time.ticks_ms()
+                self.sync_transport_activity()
                 if self.ws_debug.enabled():
                     print("[DEBUG][ws] connected; sending hello gloveId={}".format(self.glove_id))
                 self.send_ws_json({
@@ -219,9 +236,15 @@ class RuntimeApp:
                     "gloveId": self.glove_id,
                     "ts": time.ticks_ms(),
                 }, "hello")
+                self.status.update(last_error="", degraded=False)
                 self.set_connection(True, "READY")
                 if self.ws_debug.enabled():
-                    print("[DEBUG][ws] ready route={} endpoint={}".format(self.status.route, self.active_endpoint))
+                    print("[DEBUG][ws] ready route={} endpoint={} soak_test={} passive_metrics={}".format(
+                        self.status.route,
+                        self.active_endpoint,
+                        self.ws_soak_test,
+                        self.passive_metrics_enabled,
+                    ))
                 reconnect_delay_ms = 500
             except Exception as exc:
                 print("WebSocket connection failed:", repr(exc))
@@ -245,6 +268,7 @@ class RuntimeApp:
             while True:
                 try:
                     incoming = self.transport.receive_json(timeout=0.01)
+                    self.sync_transport_activity()
                     if incoming:
                         if self.ws_debug.enabled():
                             print("[DEBUG][ws] incoming {}".format(safe_json(incoming)))
@@ -255,8 +279,22 @@ class RuntimeApp:
                         self.handle_server_message(incoming)
 
                     current_ms = time.ticks_ms()
-                    if time.ticks_diff(current_ms, last_heartbeat_ms) >= self.ws_heartbeat_ms:
-                        if not self.can_attempt_ws_send(current_ms, "heartbeat"):
+                    if (
+                        self.ws_soak_test
+                        and time.ticks_diff(current_ms, last_soak_log_ms) >= 60_000
+                    ):
+                        last_soak_log_ms = current_ms
+                        print(
+                            "[DEBUG][ws] soak_status connected_ms={} five_min_stable={} last_rx_ms={} last_tx_ms={} last_pong_ms={}".format(
+                                time.ticks_diff(current_ms, self.ws_connected_at_ms),
+                                "true" if time.ticks_diff(current_ms, self.ws_connected_at_ms) >= 300_000 else "false",
+                                self.last_rx_ms,
+                                self.last_tx_ms,
+                                self.last_pong_ms,
+                            )
+                        )
+                    if self.should_send_heartbeat(current_ms, last_heartbeat_ms):
+                        if not self.can_attempt_ws_send(current_ms, "ping"):
                             last_heartbeat_ms = current_ms
                         elif not self.send_ws_heartbeat(current_ms):
                             raise RuntimeError("WebSocket heartbeat failed")
@@ -267,6 +305,8 @@ class RuntimeApp:
                         raise RuntimeError("Action ACK timeout")
 
                     if (
+                        not self.ws_soak_test
+                        and
                         self.state.mode == "ACTIVE"
                         and time.ticks_diff(current_ms, last_action_ms) >= self.action_send_interval_ms
                     ):
@@ -284,7 +324,10 @@ class RuntimeApp:
                         self.refresh_runtime_config("no_config")
                         last_config_refresh_ms = current_ms
 
-                    if time.ticks_diff(current_ms, last_metrics_ms) >= self.metric_interval_sec * 1000:
+                    if (
+                        self.passive_metrics_enabled
+                        and time.ticks_diff(current_ms, last_metrics_ms) >= self.metric_interval_sec * 1000
+                    ):
                         if not self.can_attempt_ws_send(current_ms, "passive_metrics"):
                             last_metrics_ms = current_ms
                             continue
@@ -668,7 +711,7 @@ class RuntimeApp:
         if not self.transport:
             return False
         try:
-            self.send_ws_ping("hb:{}".format(now), "heartbeat")
+            self.send_ws_ping("hb:{}".format(now), "ping")
             if self.ws_debug.enabled():
                 print("[DEBUG][ws] heartbeat ping sent endpoint={} last_successful_ws_send_ms={}".format(
                     self.active_endpoint or "none",
@@ -681,6 +724,24 @@ class RuntimeApp:
             if self.ws_debug.enabled():
                 print("[DEBUG][ws] heartbeat failed {}".format(repr(exc)))
             return False
+
+    def should_send_heartbeat(self, now, last_heartbeat_ms):
+        if time.ticks_diff(now, self.ws_connected_at_ms) < self.ws_first_heartbeat_delay_ms:
+            return False
+        last_activity_ms = max(self.last_rx_ms, self.last_tx_ms, self.last_successful_ws_send_ms)
+        if time.ticks_diff(now, last_activity_ms) < self.ws_heartbeat_ms:
+            return False
+        return time.ticks_diff(now, last_heartbeat_ms) >= self.ws_heartbeat_ms
+
+    def sync_transport_activity(self):
+        if not self.transport:
+            return
+        self.last_rx_ms = getattr(self.transport, "last_rx_ms", self.last_rx_ms) or self.last_rx_ms
+        self.last_tx_ms = getattr(self.transport, "last_tx_ms", self.last_tx_ms) or self.last_tx_ms
+        self.last_pong_ms = getattr(self.transport, "last_pong_ms", self.last_pong_ms) or self.last_pong_ms
+
+    def recent_ws_activity(self, now):
+        return time.ticks_diff(now, max(self.last_rx_ms, self.last_tx_ms, self.last_successful_ws_send_ms)) < self.ws_offline_timeout_ms
 
     def can_attempt_ws_send(self, now, kind):
         if self.ws_send_in_progress:
@@ -707,15 +768,25 @@ class RuntimeApp:
         if not self.transport:
             raise RuntimeError("websocket is not connected")
         now = time.ticks_ms()
+        if self.ws_send_in_progress:
+            raise RuntimeError("websocket send already in progress: {}".format(kind))
         if throttle and not self.can_attempt_ws_send(now, kind):
             raise RuntimeError("websocket send skipped: {}".format(kind))
+        encoded = ujson.dumps(payload)
+        payload_bytes = len(encoded)
+        self.log_ws_send_start(kind, payload_bytes)
         self.ws_send_in_progress = True
+        started = time.ticks_ms()
         try:
-            self.transport.send_json(payload)
+            self.transport.send_text(encoded)
             self.messages_sent += 1
             self.last_successful_ws_send_ms = time.ticks_ms()
+            self.sync_transport_activity()
+            self.log_ws_send_finish(kind, payload_bytes, started, True)
         except Exception:
             self.last_ws_send_failed_ms = time.ticks_ms()
+            self.sync_transport_activity()
+            self.log_ws_send_finish(kind, payload_bytes, started, False)
             raise
         finally:
             self.ws_send_in_progress = False
@@ -726,16 +797,49 @@ class RuntimeApp:
         now = time.ticks_ms()
         if not self.can_attempt_ws_send(now, kind):
             raise RuntimeError("websocket ping skipped: {}".format(kind))
+        payload_bytes = len(payload.encode("utf-8") if isinstance(payload, str) else payload)
+        self.log_ws_send_start(kind, payload_bytes)
         self.ws_send_in_progress = True
+        started = time.ticks_ms()
         try:
             self.transport.ping(payload)
             self.messages_sent += 1
             self.last_successful_ws_send_ms = time.ticks_ms()
+            self.sync_transport_activity()
+            self.log_ws_send_finish(kind, payload_bytes, started, True)
         except Exception:
             self.last_ws_send_failed_ms = time.ticks_ms()
+            self.sync_transport_activity()
+            self.log_ws_send_finish(kind, payload_bytes, started, False)
             raise
         finally:
             self.ws_send_in_progress = False
+
+    def log_ws_send_start(self, kind, payload_bytes):
+        if self.ws_debug.enabled() or self.action_debug.enabled():
+            print(
+                "[DEBUG][ws] send_start kind={} bytes={} last_rx_ms={} last_tx_ms={} last_pong_ms={}".format(
+                    kind,
+                    payload_bytes,
+                    self.last_rx_ms,
+                    self.last_tx_ms,
+                    self.last_pong_ms,
+                )
+            )
+
+    def log_ws_send_finish(self, kind, payload_bytes, started_ms, ok):
+        if self.ws_debug.enabled() or self.action_debug.enabled():
+            print(
+                "[DEBUG][ws] send_finish kind={} bytes={} duration_ms={} success={} last_rx_ms={} last_tx_ms={} last_pong_ms={}".format(
+                    kind,
+                    payload_bytes,
+                    time.ticks_diff(time.ticks_ms(), started_ms),
+                    "true" if ok else "false",
+                    self.last_rx_ms,
+                    self.last_tx_ms,
+                    self.last_pong_ms,
+                )
+            )
 
     def check_action_ack_timeouts(self, now):
         expired = []
@@ -767,21 +871,33 @@ class RuntimeApp:
                 self.transport.mark_unhealthy(error_text)
             except Exception:
                 pass
+        now = time.ticks_ms()
+        recent_activity = self.recent_ws_activity(now)
         self.status.update(
-            connected=False,
+            connected=recent_activity,
             ws_connected=False,
             last_error="WSS {}: {}".format(reason, error_text),
+            degraded=recent_activity,
         )
-        self.set_connection(False, "OFFLINE")
+        if recent_activity:
+            self.status.update(route=route_label(self.active_endpoint, self.config_source, True))
+            self.state.message = "RECONNECTING"
+            self.state.mark_dirty()
+        else:
+            self.set_connection(False, "OFFLINE")
         if self.ws_debug.enabled() or self.action_debug.enabled():
             print(
-                "[DEBUG][ws] unhealthy reconnect_reason={} error={} wifi_connected={} wlan_status={} endpoint={} last_successful_ws_send_ms={}".format(
+                "[DEBUG][ws] unhealthy reconnect_reason={} error={} wifi_connected={} wlan_status={} endpoint={} recent_activity={} last_successful_ws_send_ms={} last_rx_ms={} last_tx_ms={} last_pong_ms={}".format(
                     reason,
                     error_text,
                     self.status.wifi_connected,
                     self._wifi_status_code(),
                     self.active_endpoint or "none",
+                    "true" if recent_activity else "false",
                     self.last_successful_ws_send_ms,
+                    self.last_rx_ms,
+                    self.last_tx_ms,
+                    self.last_pong_ms,
                 )
             )
 
@@ -948,3 +1064,7 @@ def redact_url(url):
                 return text[:start] + "<redacted>"
             return text[:start] + "<redacted>" + text[end:]
     return text
+
+
+def env_bool(value):
+    return str(value or "").lower() in ("1", "true", "yes", "on")

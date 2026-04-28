@@ -33,6 +33,7 @@ class SimpleWebSocketClient:
         self.healthy = False
         self.last_rx_ms = 0
         self.last_tx_ms = 0
+        self.last_pong_ms = 0
         self.last_error = ""
 
     def connect(self):
@@ -105,6 +106,7 @@ class SimpleWebSocketClient:
         self.healthy = True
         self.last_rx_ms = time.ticks_ms()
         self.last_tx_ms = self.last_rx_ms
+        self.last_pong_ms = 0
         print("[ws] connected successfully")
 
     def close(self):
@@ -198,6 +200,7 @@ class SimpleWebSocketClient:
             return None
         if opcode == 0xA:
             self.last_rx_ms = time.ticks_ms()
+            self.last_pong_ms = self.last_rx_ms
             return None
         return None
 
