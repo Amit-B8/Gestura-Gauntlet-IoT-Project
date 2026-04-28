@@ -21,7 +21,12 @@ class GloveConfigService {
     const managerById = new Map(managers.map((manager) => [manager.id, manager]));
     const mappings = this.resolveMappings(gloveId);
     const enabledCapabilities = capabilitiesByDevice(mappings);
-    return {
+    const policy = {
+      activeCommandBacklog: false,
+      passiveMetricsBuffer: true,
+      lanCooldownMs: 15_000,
+    };
+    const snapshot = {
       gloveId,
       ts: Date.now(),
       mappings,
@@ -37,12 +42,11 @@ class GloveConfigService {
       endpoints: this.getEndpointMetadata(),
       wifiNetworks: this.listWifiNetworks(gloveId),
       routeStates: this.getRouteStates(),
-      policy: {
-        activeCommandBacklog: false,
-        passiveMetricsBuffer: true,
-        lanCooldownMs: 15_000,
-      },
+      policy,
     };
+    snapshot.configVersion = 1;
+    snapshot.configHash = stableHash(stableConfigPayload(snapshot));
+    return snapshot;
   }
 
   resolveMappings(gloveId) {
@@ -73,7 +77,7 @@ class GloveConfigService {
         interfaces: normalizeInterfaces(node.interfaces || []),
       })),
     };
-    endpoints.hash = stableHash(endpoints.nodes);
+    endpoints.hash = stableHash(stableEndpointPayload(endpoints));
     return endpoints;
   }
 
@@ -207,6 +211,53 @@ function parseUrlList(value) {
 
 function stableHash(value) {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+function stableConfigPayload(snapshot) {
+  return {
+    endpoints: stableEndpointPayload(snapshot.endpoints || {}),
+    mappings: stripVolatile(snapshot.mappings || []),
+    devices: stripVolatile(snapshot.devices || []),
+    managers: stripVolatile(snapshot.managers || []),
+    policy: stripVolatile(snapshot.policy || {}),
+  };
+}
+
+function stableEndpointPayload(endpoints) {
+  return {
+    version: endpoints.version || 1,
+    nodes: (endpoints.nodes || []).map((node) => ({
+      nodeId: node.nodeId,
+      name: node.name,
+      interfaces: node.interfaces || [],
+    })),
+  };
+}
+
+const VOLATILE_HASH_KEYS = new Set([
+  'generatedAt',
+  'lastHeartbeatAt',
+  'lastSeenAt',
+  'lastSeen',
+  'heartbeatAt',
+  'heartbeatTs',
+  'onlineAt',
+  'connectedAt',
+  'updatedAt',
+  'ts',
+  'online',
+  'connected',
+]);
+
+function stripVolatile(value) {
+  if (Array.isArray(value)) return value.map(stripVolatile);
+  if (!value || typeof value !== 'object') return value;
+  const out = {};
+  for (const key of Object.keys(value).sort()) {
+    if (VOLATILE_HASH_KEYS.has(key)) continue;
+    out[key] = stripVolatile(value[key]);
+  }
+  return out;
 }
 
 module.exports = { GloveConfigService };

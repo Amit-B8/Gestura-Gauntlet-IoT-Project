@@ -63,6 +63,7 @@ services:
     container_name: gestura-backend
     environment:
       NODE_ENV: production
+      DEBUG: ${DEBUG:-}
       PORT: 3001
       DATABASE_URL: postgres://gestura:gestura_dev_password@postgres:5432/gestura
       DATABASE_SSL: "false"

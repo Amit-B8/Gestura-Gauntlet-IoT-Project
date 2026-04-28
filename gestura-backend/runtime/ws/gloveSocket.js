@@ -13,6 +13,7 @@ function createGloveSocketHub({
 }) {
   const wss = new WebSocketServer({ noServer: true });
   const clients = new Set();
+  const debug = isDebugEnabled();
 
   server.on('upgrade', (req, socket, head) => {
     let url;
@@ -40,6 +41,7 @@ function createGloveSocketHub({
   wss.on('connection', (ws) => {
     clients.add(ws);
     ws.isAlive = true;
+    debugLog(debug, `connected gloveId=${ws.gloveId || 'unknown'} clients=${clients.size}`);
     send(ws, {
       type: 'welcome',
       gloveId: ws.gloveId,
@@ -55,6 +57,7 @@ function createGloveSocketHub({
       try {
         if (payload.type === 'hello') {
           ws.gloveId = payload.gloveId || ws.gloveId;
+          debugLog(debug, `hello gloveId=${ws.gloveId}`);
           send(ws, {
             type: 'config_snapshot',
             gloveId: ws.gloveId,
@@ -94,7 +97,9 @@ function createGloveSocketHub({
         }
 
         if (payload.type === 'ping') {
+          debugLog(debug, `received ping gloveId=${ws.gloveId} ts=${payload.ts || ''}`);
           send(ws, { type: 'pong', gloveId: ws.gloveId, ts: Date.now(), echo: payload.ts });
+          debugLog(debug, `sent pong gloveId=${ws.gloveId}`);
           return;
         }
 
@@ -110,7 +115,10 @@ function createGloveSocketHub({
         }
 
         if (payload.type === 'passive_metrics') {
-          await gloveConfigService.ingestPassiveMetrics(ws.gloveId, payload.metrics || []);
+          const metrics = payload.metrics || [];
+          debugLog(debug, `received metrics gloveId=${ws.gloveId} count=${Array.isArray(metrics) ? metrics.length : 0}`);
+          await gloveConfigService.ingestPassiveMetrics(ws.gloveId, metrics);
+          debugLog(debug, `metrics stored gloveId=${ws.gloveId} count=${Array.isArray(metrics) ? metrics.length : 0}`);
           send(ws, { type: 'passive_metrics_ack', gloveId: ws.gloveId, ts: Date.now() });
           return;
         }
@@ -130,6 +138,7 @@ function createGloveSocketHub({
           ]);
         }
       } catch (error) {
+        debugLog(debug, `handler error gloveId=${ws.gloveId} type=${payload.type} error=${error instanceof Error ? error.stack || error.message : error}`);
         send(ws, {
           type: 'error',
           ts: Date.now(),
@@ -138,18 +147,30 @@ function createGloveSocketHub({
       }
     });
 
-    ws.on('close', () => {
+    ws.on('ping', (data) => {
+      debugLog(debug, `received ping gloveId=${ws.gloveId} bytes=${data?.length || 0}`);
+      debugLog(debug, `sent pong gloveId=${ws.gloveId}`);
+    });
+
+    ws.on('close', (code, reason) => {
       clients.delete(ws);
+      debugLog(debug, `socket closed gloveId=${ws.gloveId} code=${code} reason=${reason ? reason.toString() : ''} clients=${clients.size}`);
     });
 
     ws.on('pong', () => {
       ws.isAlive = true;
+      debugLog(debug, `received pong gloveId=${ws.gloveId}`);
+    });
+
+    ws.on('error', (error) => {
+      debugLog(debug, `socket error gloveId=${ws.gloveId} error=${error instanceof Error ? error.stack || error.message : error}`);
     });
   });
 
   const heartbeat = setInterval(() => {
     for (const ws of clients) {
       if (ws.isAlive === false) {
+        debugLog(debug, `socket terminate reason=heartbeat_timeout gloveId=${ws.gloveId}`);
         ws.terminate();
         clients.delete(ws);
         continue;
@@ -158,6 +179,7 @@ function createGloveSocketHub({
       try {
         ws.ping();
       } catch {
+        debugLog(debug, `socket terminate reason=heartbeat_ping_failed gloveId=${ws.gloveId}`);
         ws.terminate();
         clients.delete(ws);
       }
@@ -201,6 +223,15 @@ function send(ws, payload) {
   if (ws.readyState === ws.OPEN) {
     ws.send(JSON.stringify(payload));
   }
+}
+
+function isDebugEnabled() {
+  const value = String(process.env.DEBUG || '').toLowerCase();
+  return Boolean(value) && !['0', 'false', 'off', 'no'].includes(value);
+}
+
+function debugLog(enabled, message) {
+  if (enabled) console.log(`[DEBUG][glove-ws] ${message}`);
 }
 
 module.exports = { createGloveSocketHub };

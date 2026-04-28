@@ -30,7 +30,7 @@ class EndpointCache:
     def update_if_changed(self, metadata, ca_der_path=""):
         next_data = {
             "version": int(metadata.get("version", 1)),
-            "hash": metadata.get("hash") or stable_hash(metadata.get("nodes", [])),
+            "hash": metadata.get("hash") or stable_hash(stable_endpoint_nodes(metadata.get("nodes", []))),
             "updated_at": int(time.time()) if hasattr(time, "time") else 0,
             "last_good_node_id": self.data.get("last_good_node_id", ""),
             "nodes": metadata.get("nodes", []),
@@ -82,3 +82,14 @@ def stable_hash(value):
     payload = ujson.dumps(value)
     digest = uhashlib.sha256(payload.encode("utf-8")).digest()
     return "".join("{:02x}".format(byte) for byte in digest)
+
+
+def stable_endpoint_nodes(nodes):
+    stable = []
+    for node in nodes or []:
+        stable.append({
+            "nodeId": node.get("nodeId", ""),
+            "name": node.get("name", ""),
+            "interfaces": node.get("interfaces", []),
+        })
+    return stable
