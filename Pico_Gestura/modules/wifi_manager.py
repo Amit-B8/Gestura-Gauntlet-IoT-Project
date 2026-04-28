@@ -1,6 +1,8 @@
 import network
 import time
 import ujson
+import time
+import ntptime
 
 
 class WiFiManager:
@@ -234,3 +236,13 @@ def normalize_scan(raw):
         except Exception:
             pass
     return results
+
+def sync_time_ntp():
+    try:
+        ntptime.host = "pool.ntp.org"
+        ntptime.settime()
+        print("NTP time synced:", time.localtime())
+        return True
+    except Exception as exc:
+        print("NTP sync failed:", exc)
+        return False

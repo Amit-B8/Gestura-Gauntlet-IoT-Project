@@ -6,10 +6,10 @@ class FSRInputReader:
         self,
         top_fsr,
         bottom_fsr,
-        debounce_ms=50,
-        double_click_ms=420,
-        hold_ms=650,
-        hold_repeat_ms=220,
+        debounce_ms=25,
+        double_click_ms=280,
+        hold_ms=450,
+        hold_repeat_ms=160,
     ):
         self.top = ChannelState("top", top_fsr, debounce_ms, double_click_ms, hold_ms, hold_repeat_ms)
         self.bottom = ChannelState("bottom", bottom_fsr, debounce_ms, double_click_ms, hold_ms, hold_repeat_ms)
@@ -23,6 +23,12 @@ class FSRInputReader:
     def bottom_pressure(self):
         return self.bottom.pressure()
 
+    def debug_snapshot(self):
+        return {
+            "top": self.top.debug_snapshot(),
+            "bottom": self.bottom.debug_snapshot(),
+        }
+
 
 class ChannelState:
     def __init__(self, name, fsr, debounce_ms, double_click_ms, hold_ms, hold_repeat_ms):
@@ -35,7 +41,7 @@ class ChannelState:
         self.is_down = False
         self.down_at = 0
         self.last_transition_ms = 0
-        self.pending_click_at = 0
+        self.last_click_at = 0
         self.hold_active = False
         self.last_hold_ms = 0
 
@@ -55,27 +61,28 @@ class ChannelState:
             else:
                 duration = time.ticks_diff(now, self.down_at)
                 if not self.hold_active and duration >= self.debounce_ms:
-                    if self.pending_click_at and time.ticks_diff(now, self.pending_click_at) <= self.double_click_ms:
+                    events.append({
+                        "type": "{}_click".format(self.name),
+                        "source": self.name,
+                        "duration_ms": duration,
+                    })
+                    if self.last_click_at and time.ticks_diff(now, self.last_click_at) <= self.double_click_ms:
                         events.append({"type": "{}_double".format(self.name), "source": self.name})
-                        self.pending_click_at = 0
+                        self.last_click_at = 0
                     else:
-                        self.pending_click_at = now
+                        self.last_click_at = now
 
         if self.is_down:
             duration = time.ticks_diff(now, self.down_at)
             if duration >= self.hold_ms and time.ticks_diff(now, self.last_hold_ms) >= self.hold_repeat_ms:
                 self.hold_active = True
                 self.last_hold_ms = now
-                self.pending_click_at = 0
+                self.last_click_at = 0
                 events.append({
                     "type": "{}_hold".format(self.name),
                     "source": self.name,
                     "duration_ms": duration,
                 })
-
-        if self.pending_click_at and time.ticks_diff(now, self.pending_click_at) > self.double_click_ms:
-            events.append({"type": "{}_click".format(self.name), "source": self.name})
-            self.pending_click_at = 0
 
         return events
 
@@ -84,3 +91,9 @@ class ChannelState:
             return self.fsr.get_pressure_percentage()
         except Exception:
             return 0.0
+
+    def debug_snapshot(self):
+        try:
+            return self.fsr.debug_snapshot()
+        except Exception as exc:
+            return {"error": str(exc)}

@@ -10,9 +10,12 @@ except ImportError:
     urandom = None
 
 try:
-    import ussl
+    import ssl
 except ImportError:
-    ussl = None
+    try:
+        import ussl as ssl
+    except ImportError:
+        ssl = None
 
 from lib.env import parse_ws_url
 
@@ -29,48 +32,73 @@ class SimpleWebSocketClient:
         self.parsed = parse_ws_url(url)
 
     def connect(self):
-        if self.parsed["secure"] and ussl is None:
-            raise RuntimeError("ussl is required for wss:// support")
+        if self.parsed["secure"] and ssl is None:
+            raise RuntimeError("ssl is required for wss:// support")
 
-        addr = usocket.getaddrinfo(self.parsed["host"], self.parsed["port"])[0][-1]
-        sock = usocket.socket()
-        sock.settimeout(self.timeout)
-        sock.connect(addr)
+        # Stage 1: DNS + TCP
+        try:
+            addr = usocket.getaddrinfo(self.parsed["host"], self.parsed["port"])[0][-1]
+            sock = usocket.socket()
+            sock.settimeout(self.timeout)
+            sock.connect(addr)
+            self._raw_sock = sock
+            print("[ws] TCP connected")
+        except Exception as e:
+            raise RuntimeError("Stage 1 (TCP connect) failed: {}".format(repr(e)))
 
+        # Stage 2: TLS wrap
         if self.parsed["secure"]:
-            kwargs = {"server_hostname": self.parsed["host"]}
-            ca_data = load_ca(self.ca_der_path)
-            if ca_data:
-                kwargs["cadata"] = ca_data
-                kwargs["cert_reqs"] = 2
             try:
-                sock = ussl.wrap_socket(sock, **kwargs)
+                sock = ssl.wrap_socket(sock, server_hostname=self.parsed["host"])
+                print("[ws] TLS wrapped")
             except TypeError:
-                if ca_data:
-                    raise RuntimeError("CA DER validation is not supported by this firmware")
-                sock = ussl.wrap_socket(sock, server_hostname=self.parsed["host"])
+                sock = ssl.wrap_socket(sock)
+            except Exception as e:
+                raise RuntimeError("Stage 2 (TLS wrap) failed: {}".format(repr(e)))
 
-        key = random_b64(16)
-        request = [
-            "GET {} HTTP/1.1".format(self.parsed["path"]),
-            "Host: {}:{}".format(self.parsed["host"], self.parsed["port"]),
-            "Upgrade: websocket",
-            "Connection: Upgrade",
-            "Sec-WebSocket-Version: 13",
-            "Sec-WebSocket-Key: {}".format(key),
-        ]
-        for header, value in self.headers.items():
-            request.append("{}: {}".format(header, value))
-        request.append("")
-        request.append("")
+        # Stage 3: Key generation
+        try:
+            key = random_b64(16)
+            print("[ws] key:", key)
+        except Exception as e:
+            raise RuntimeError("Stage 3 (key gen) failed: {}".format(repr(e)))
 
-        sock.write("\r\n".join(request).encode("utf-8"))
-        response = read_http_response(sock)
+        # Stage 4: Build + send HTTP upgrade
+        try:
+            host = self.parsed["host"]
+            if self.parsed["port"] not in (80, 443):
+                host = "{}:{}".format(self.parsed["host"], self.parsed["port"])
+            request = [
+                "GET {} HTTP/1.1".format(self.parsed["path"]),
+                "Host: {}".format(host),
+                "Upgrade: websocket",
+                "Connection: Upgrade",
+                "Sec-WebSocket-Version: 13",
+                "Sec-WebSocket-Key: {}".format(key),
+            ]
+            for header, value in self.headers.items():
+                request.append("{}: {}".format(header, value))
+            request.append("")
+            request.append("")
+            raw = "\r\n".join(request).encode("utf-8")
+            print("[ws] sending upgrade request, {} bytes".format(len(raw)))
+            sock.write(raw)
+        except Exception as e:
+            raise RuntimeError("Stage 4 (HTTP upgrade send) failed: {}".format(repr(e)))
+
+        # Stage 5: Read + validate response
+        try:
+            response = read_http_response(sock)
+            print("[ws] response first line:", response.split("\r\n", 1)[0])
+        except Exception as e:
+            raise RuntimeError("Stage 5 (read HTTP response) failed: {}".format(repr(e)))
+
         if " 101 " not in response.split("\r\n", 1)[0]:
             sock.close()
             raise RuntimeError("websocket upgrade failed: {}".format(response.split("\r\n", 1)[0]))
 
         self.sock = sock
+        print("[ws] connected successfully")
 
     def close(self):
         if self.sock:
@@ -127,14 +155,14 @@ class SimpleWebSocketClient:
         if self.sock is None:
             return None
 
-        self.sock.settimeout(timeout)
+        # self.sock.settimeout(timeout)
         try:
             opcode, payload = self.read_frame()
         except OSError:
             return None
 
         if opcode == 0x1:
-            return payload.decode("utf-8")
+            return payload.decode("utf-8", "ignore")
         if opcode == 0x8:
             self.close()
             return None
@@ -169,22 +197,33 @@ class SimpleWebSocketClient:
 
 
 def read_http_response(sock):
+    buf = bytearray(1)
     data = b""
     while b"\r\n\r\n" not in data:
-        chunk = sock.read(128)
-        if not chunk:
+        try:
+            n = sock.readinto(buf, 1)
+        except UnicodeError:
+            # ussl raises this on some TLS record boundaries on RP2350
+            continue
+        except OSError:
             break
-        data += chunk
-    return data.decode("utf-8")
+        if not n:
+            break
+        data += bytes(buf[:n])
+    return data.decode("latin-1")
 
 
 def read_exact(sock, length):
     data = b""
+    buf = bytearray(length)
     while len(data) < length:
-        chunk = sock.read(length - len(data))
-        if not chunk:
+        try:
+            n = sock.readinto(buf, length - len(data))
+        except UnicodeError:
+            n = sock.readinto(buf, 1)
+        if not n:
             raise OSError("connection closed")
-        data += chunk
+        data += bytes(buf[:n])
     return data
 
 
@@ -204,12 +243,12 @@ def random_bytes(length):
 
 
 def random_b64(length):
-    return ubinascii.b2a_base64(random_bytes(length)).strip().decode("utf-8")
+    return ubinascii.b2a_base64(random_bytes(length)).decode("utf-8").strip()
 
 
 def websocket_accept(key):
     sha1 = uhashlib.sha1((key + GUID).encode("utf-8"))
-    return ubinascii.b2a_base64(sha1.digest()).strip().decode("utf-8")
+    return ubinascii.b2a_base64(sha1.digest()).strip().decode()
 
 
 def load_ca(ca_der_path):

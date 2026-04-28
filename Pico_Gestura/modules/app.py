@@ -7,6 +7,7 @@ from lib.endpoint_cache import EndpointCache
 from lib.env import http_to_ws_url, ws_to_http_url
 from lib.http_client import get_json
 from lib.websocket_client import SimpleWebSocketClient
+from modules.debug import DebugPrinter
 from modules.device_models import normalize_devices, normalize_managers
 from modules.navigation import AppState, NavigationController
 from modules.status import StatusState, route_label
@@ -29,7 +30,10 @@ class RuntimeApp:
         self.status.update(battery=env.get("BATTERY_LABEL", "--"))
         self.state = AppState(self.status)
         self.state.wifi_manager = wifi_manager
-        self.navigation = NavigationController(self.state)
+        debug_config = env.get("DEBUG_CONFIG")
+        self.navigation = NavigationController(self.state, debug_config=debug_config)
+        self.imu_debug = DebugPrinter(env.get("DEBUG_CONFIG"), "imu")
+        self.wifi_debug = DebugPrinter(debug_config, "wifi")
         self.transport = None
         self.active_endpoint = None
         self.config_source = "offline"
@@ -136,7 +140,7 @@ class RuntimeApp:
                 self.set_connection(True, "READY")
                 reconnect_delay_ms = 500
             except Exception as exc:
-                print("WebSocket connection failed:", exc)
+                print("WebSocket connection failed:", repr(exc))
                 self.messages_failed += 1
                 self.transport = None
                 self.active_endpoint = None
@@ -213,6 +217,19 @@ class RuntimeApp:
                     "roll_deg": orientation["roll_deg"],
                     "pitch_deg": orientation["pitch_deg"],
                 })
+                if self.imu_debug.should_print():
+                    print(
+                        "[DEBUG][imu] accel=({:.3f},{:.3f},{:.3f}) gyro=({:.3f},{:.3f},{:.3f}) roll={:.1f} pitch={:.1f}".format(
+                            accel_data["x"],
+                            accel_data["y"],
+                            accel_data["z"],
+                            gyro_data["x"],
+                            gyro_data["y"],
+                            gyro_data["z"],
+                            orientation["roll_deg"],
+                            orientation["pitch_deg"],
+                        )
+                    )
             except Exception as exc:
                 self.status.update(last_error=str(exc))
             await asyncio.sleep_ms(20)
@@ -220,15 +237,40 @@ class RuntimeApp:
     async def wifi_task(self):
         while True:
             if self.wifi_manager:
+                if self.wifi_debug.should_print():
+                    print(
+                        "[DEBUG][wifi] status={} connected={} ssid={} ifconfig={} route={} endpoint={}".format(
+                            self._wifi_status_code(),
+                            self.wifi_manager.is_connected(),
+                            self.wifi_manager.current_ssid(),
+                            self._wifi_ifconfig(),
+                            self.status.route,
+                            self.active_endpoint or "none",
+                        )
+                    )
                 if self.wifi_manager.scan():
+                    if self.wifi_debug.enabled():
+                        print("[DEBUG][wifi] scan profiles={} found={}".format(
+                            len(self.wifi_manager.profiles),
+                            len(self.wifi_manager.scan_results),
+                        ))
                     self.state.mark_dirty()
                 if not self.wifi_manager.is_connected():
                     self.status.update(connected=False, route="OFFLINE", last_error="WiFi disconnected")
                     self.state.mark_dirty()
+                    if self.wifi_debug.enabled():
+                        print("[DEBUG][wifi] disconnected; attempting reconnect")
                     if self.wifi_manager.ensure_connected():
                         self.status.update(wifi_ssid=self.wifi_manager.current_ssid(), last_error="")
                         self.active_endpoint = None
                         self.state.mark_dirty()
+                        if self.wifi_debug.enabled():
+                            print("[DEBUG][wifi] reconnect ok ssid={} ip={}".format(
+                                self.wifi_manager.current_ssid(),
+                                self._wifi_ifconfig()[0],
+                            ))
+                    elif self.wifi_debug.enabled():
+                        print("[DEBUG][wifi] reconnect failed status={}".format(self._wifi_status_code()))
                 else:
                     self.status.update(wifi_ssid=self.wifi_manager.current_ssid())
             await asyncio.sleep_ms(15_000)
@@ -300,10 +342,14 @@ class RuntimeApp:
         cache = EndpointCache(self.endpoint_cache_path)
         if not cache.data.get("nodes"):
             try:
+                if self.wifi_debug.enabled():
+                    print("[DEBUG][wifi] fetching endpoint metadata {}".format(self.central_glove_api_url("endpoints")))
                 metadata = self.fetch_json(self.central_glove_api_url("endpoints"))
                 cache.update_if_changed(metadata, ca_der_path=self.ca_der_path)
             except Exception as exc:
                 self.status.update(last_error=str(exc))
+                if self.wifi_debug.enabled():
+                    print("[DEBUG][wifi] endpoint metadata failed: {}".format(exc))
 
         attempts = []
         seen = {}
@@ -321,17 +367,28 @@ class RuntimeApp:
 
         for source, url, interface in attempts:
             try:
+                if self.wifi_debug.enabled():
+                    print("[DEBUG][wifi] config attempt source={} url={}".format(source, url))
                 config = self.fetch_json(url)
                 endpoints = self.update_runtime_config(config, source)
                 if endpoints:
                     cache.update_if_changed(endpoints, ca_der_path=self.ca_der_path)
                 if interface:
                     cache.set_last_good(interface.get("nodeId", ""))
+                if self.wifi_debug.enabled():
+                    print("[DEBUG][wifi] config ok source={} endpoint={}".format(
+                        source,
+                        interface.get("url") if interface else self.glove_ws_url,
+                    ))
                 return interface.get("url") if interface else self.glove_ws_url
             except Exception as exc:
                 self.status.update(last_error=str(exc))
+                if self.wifi_debug.enabled():
+                    print("[DEBUG][wifi] config failed source={} url={} error={}".format(source, url, exc))
 
         self.update_runtime_config({"mappings": [], "devices": [], "managers": []}, "offline")
+        if self.wifi_debug.enabled():
+            print("[DEBUG][wifi] all route/config attempts failed; Route OFFLINE")
         return None
 
     def refresh_runtime_config(self):
@@ -391,6 +448,18 @@ class RuntimeApp:
 
     def fetch_json(self, url):
         return get_json(self.with_pico_auth(url), ca_der_path=self.ca_der_path)
+
+    def _wifi_status_code(self):
+        try:
+            return self.wifi_manager.wlan.status() if self.wifi_manager else "none"
+        except Exception as exc:
+            return "err:{}".format(exc)
+
+    def _wifi_ifconfig(self):
+        try:
+            return self.wifi_manager.wlan.ifconfig() if self.wifi_manager else ("", "", "", "")
+        except Exception:
+            return ("", "", "", "")
 
     def central_glove_api_url(self, suffix):
         base = ws_to_http_url(self.glove_ws_url).split("?", 1)[0]

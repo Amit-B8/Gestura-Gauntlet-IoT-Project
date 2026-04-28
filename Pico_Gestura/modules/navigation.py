@@ -1,4 +1,5 @@
 from modules.device_models import build_action, group_devices_by_manager
+from modules.debug import DebugPrinter
 from modules.screens import DeviceDetailScreen, ListScreen, StatusScreen
 
 
@@ -25,8 +26,9 @@ class AppState:
 
 
 class NavigationController:
-    def __init__(self, state):
+    def __init__(self, state, debug_config=None):
         self.state = state
+        self.fsr_debug = DebugPrinter(debug_config, "fsr")
         self.show_main()
 
     def update_inventory(self, managers, devices, mappings):
@@ -44,7 +46,12 @@ class NavigationController:
     def handle_events(self, events):
         changed = False
         for event in events:
-            changed = self.handle_event(event) or changed
+            screen = self.state.current_screen
+            screen_kind = screen.kind if screen else "none"
+            action = describe_event_action(event.get("type"), screen_kind)
+            event_changed = self.handle_event(event)
+            self._debug_event(event, screen_kind, action, event_changed)
+            changed = event_changed or changed
         if changed:
             self.state.mark_dirty()
         return changed
@@ -62,9 +69,9 @@ class NavigationController:
 
         if screen.kind == "list":
             if name == "top_click":
-                return screen.move(1)
+                return screen.move(1, visible_rows=VISIBLE_LIST_ROWS)
             if name == "bottom_hold":
-                return screen.move(1)
+                return screen.move(1, visible_rows=VISIBLE_LIST_ROWS)
             if name == "bottom_click":
                 return self.enter_selected()
             return False
@@ -74,7 +81,7 @@ class NavigationController:
                 rows = self.state.status.full_rows()
                 if not rows:
                     return False
-                screen.move(1)
+                screen.move(1, visible_rows=VISIBLE_STATUS_ROWS)
                 if screen.selected_index >= len(rows):
                     screen.selected_index = 0
                     screen.scroll_offset = 0
@@ -91,6 +98,19 @@ class NavigationController:
             if name == "bottom_click":
                 return self.apply_device_action(screen)
         return False
+
+    def _debug_event(self, event, screen_kind, action, changed):
+        if not self.fsr_debug.enabled():
+            return
+        print(
+            "[DEBUG][fsr] event={} source={} screen={} action={} changed={}".format(
+                event.get("type", "?"),
+                event.get("source", "?"),
+                screen_kind,
+                action,
+                changed,
+            )
+        )
 
     def enter_selected(self):
         item = self.state.current_screen.selected_item()
@@ -275,3 +295,34 @@ class NavigationController:
             {"label": "Mappings {}".format(len(self.state.mappings)), "kind": "info"},
             {"label": "Mode {}".format(self.state.mode), "kind": "info"},
         ]
+
+
+VISIBLE_LIST_ROWS = 3
+VISIBLE_STATUS_ROWS = 4
+
+
+def describe_event_action(event_type, screen_kind):
+    if event_type == "top_double":
+        return "back"
+    if screen_kind == "list":
+        if event_type == "top_click":
+            return "next_menu_item"
+        if event_type == "bottom_hold":
+            return "scroll_next_menu_item"
+        if event_type == "bottom_click":
+            return "enter_selected_menu_item"
+        if event_type == "bottom_double":
+            return "ignored_click_already_sent"
+    if screen_kind == "status":
+        if event_type in ("top_click", "bottom_hold"):
+            return "scroll_status_rows"
+    if screen_kind == "device":
+        if event_type == "top_click":
+            return "next_device_action"
+        if event_type == "bottom_hold":
+            return "adjust_selected_action_value"
+        if event_type == "bottom_click":
+            return "queue_selected_action"
+        if event_type == "bottom_double":
+            return "ignored_click_already_sent"
+    return "ignored"

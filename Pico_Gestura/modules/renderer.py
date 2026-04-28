@@ -51,7 +51,7 @@ class SSD1306Renderer:
 
     def _list_screen(self, screen, y):
         self.oled.text(truncate(screen.title, 16), 0, y)
-        visible = 4
+        visible = self._visible_rows(y + 12)
         start = screen.scroll_offset
         for row in range(visible):
             index = start + row
@@ -62,38 +62,41 @@ class SSD1306Renderer:
             label = item.get("label", "")
             self.oled.text(marker + scroll_or_truncate(label, 14, self.scroll_offset), 0, y + 12 + (row * 10))
         if not screen.items:
-            self.oled.text("No items", 0, y + 14)
+            self._safe_text("No items", 0, y + 12)
 
     def _device_screen(self, screen, y):
         device = screen.device
         action = screen.selected_action()
         self.oled.text(truncate(device.name, 16), 0, y)
         if action is None:
-            self.oled.text("No actions", 0, y + 14)
+            self._safe_text("No actions", 0, y + 12)
             return
         value = screen.current_value()
-        self.oled.text("Act {}".format(truncate(action.label, 11)), 0, y + 12)
-        self.oled.text("Val {}".format(truncate(display_value(action, value), 11)), 0, y + 24)
+        self._safe_text("Act {}".format(truncate(action.label, 11)), 0, y + 12)
+        self._safe_text("Val {}".format(truncate(display_value(action, value), 11)), 0, y + 24)
         if action.kind in ("range", "color"):
-            self._progress_bar(0, y + 40, 92, 8, value, action.min(), action.max())
-            self.oled.text(truncate(action.unit(), 4), 98, y + 39)
+            if self._line_fits(y + 40):
+                self._progress_bar(0, y + 40, 92, 8, value, action.min(), action.max())
+                self.oled.text(truncate(action.unit(), 4), 98, y + 39)
         elif action.kind == "boolean":
-            self.oled.text("Bottom toggles", 0, y + 40)
+            self._safe_text("Bottom toggles", 0, y + 40)
         elif action.kind == "enum":
-            self.oled.text("Hold cycles", 0, y + 40)
+            self._safe_text("Hold cycles", 0, y + 40)
         else:
-            self.oled.text("Bottom runs", 0, y + 40)
+            self._safe_text("Bottom runs", 0, y + 40)
 
     def _status_screen(self, state, y):
         self.oled.text("Status", 0, y)
         rows = state.status.full_rows()
         start = state.current_screen.scroll_offset
-        for row in range(5):
+        visible = self._visible_rows(y + 12)
+        for row in range(visible):
             index = start + row
             if index >= len(rows):
                 break
             label, value = rows[index]
-            text = "{} {}".format(label, value)
+            marker = ">" if index == state.current_screen.selected_index else " "
+            text = "{}{} {}".format(marker, label, value)
             self.oled.text(scroll_or_truncate(text, 16, self.scroll_offset), 0, y + 12 + (row * 10))
 
     def _progress_bar(self, x, y, width, height, value, minimum, maximum):
@@ -115,6 +118,21 @@ class SSD1306Renderer:
         self.scroll_offset = (self.scroll_offset + 1) % 24
         screen = state.current_screen
         return bool(screen and has_long_text(screen, state))
+
+    def _content_bottom(self):
+        return 56
+
+    def _line_fits(self, y):
+        return y + 8 <= self._content_bottom()
+
+    def _safe_text(self, text, x, y):
+        if self._line_fits(y):
+            self.oled.text(text, x, y)
+
+    def _visible_rows(self, first_y):
+        if not self._line_fits(first_y):
+            return 0
+        return ((self._content_bottom() - 8 - first_y) // 10) + 1
 
 
 def has_long_text(screen, state):
