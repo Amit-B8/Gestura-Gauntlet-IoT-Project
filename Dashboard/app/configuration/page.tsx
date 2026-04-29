@@ -94,12 +94,16 @@ export default function ConfigurationPage() {
       : [],
     [selectedDevice, selectedDeviceMappings],
   );
+  const testableCapabilities = useMemo(
+    () => selectedDevice?.capabilities ?? [],
+    [selectedDevice],
+  );
   const testCapability = useMemo(
     () =>
-      enabledCapabilities.find((capability) => capability.id === testCapabilityId) ??
-      enabledCapabilities[0] ??
+      testableCapabilities.find((capability) => capability.id === testCapabilityId) ??
+      testableCapabilities[0] ??
       null,
-    [enabledCapabilities, testCapabilityId],
+    [testableCapabilities, testCapabilityId],
   );
 
   const sortedDevices = useMemo(() => {
@@ -374,13 +378,13 @@ export default function ConfigurationPage() {
   }, []);
 
   useEffect(() => {
-    const nextCapability = enabledCapabilities[0] ?? null;
+    const nextCapability = testableCapabilities[0] ?? null;
     setTestCapabilityId(nextCapability?.id ?? "");
     setTestValue(nextCapability ? defaultTestValue(nextCapability) : "");
     setTestStatus(
-      nextCapability ? "Ready to test an allowed device function." : "Select a device function to test.",
+      nextCapability ? "Ready to test a device function." : "Select a device function to test.",
     );
-  }, [enabledCapabilities, selectedDevice?.id]);
+  }, [selectedDevice?.id, testableCapabilities]);
 
   useEffect(() => {
     if (testCapability) {
@@ -845,7 +849,7 @@ export default function ConfigurationPage() {
                 <TestFunctionPanel
                   device={selectedDevice}
                   capability={testCapability}
-                  enabledCapabilities={enabledCapabilities}
+                  capabilities={testableCapabilities}
                   capabilityId={testCapabilityId}
                   value={testValue}
                   status={testStatus}
@@ -1044,7 +1048,7 @@ function FunctionMappingCard({
 function TestFunctionPanel({
   device,
   capability,
-  enabledCapabilities,
+  capabilities,
   capabilityId,
   value,
   status,
@@ -1055,7 +1059,7 @@ function TestFunctionPanel({
 }: {
   device: DeviceDefinition;
   capability: DeviceCapability | null;
-  enabledCapabilities: DeviceCapability[];
+  capabilities: DeviceCapability[];
   capabilityId: string;
   value: string;
   status: string;
@@ -1081,13 +1085,13 @@ function TestFunctionPanel({
           <Select
             value={capabilityId}
             onValueChange={onCapabilityChange}
-            disabled={enabledCapabilities.length === 0 || isRunning}
+            disabled={capabilities.length === 0 || isRunning}
           >
             <SelectTrigger className="w-full">
               <SelectValue placeholder="Select function" />
             </SelectTrigger>
             <SelectContent>
-              {enabledCapabilities.map((item) => (
+              {capabilities.map((item) => (
                 <SelectItem key={item.id} value={item.id}>
                   {item.label}
                 </SelectItem>
