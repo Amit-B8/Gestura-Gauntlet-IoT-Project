@@ -68,7 +68,11 @@ class ManagerAttachmentServer {
       };
       const actionId = req.body?.actionId;
       try {
-        const result = await this.onGloveAction?.(action);
+        const result = await this.onGloveAction?.({
+          ...action,
+          gloveId: req.params.gloveId,
+          actionId,
+        });
         if (result?.ok === false) {
           logHttpActionFailure({
             gloveId: req.params.gloveId,

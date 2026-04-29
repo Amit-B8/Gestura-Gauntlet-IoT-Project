@@ -7,8 +7,8 @@ class StatusState:
         self.wifi_ssid = wifi_ssid or "unknown"
         self.route = "OFFLINE"
         self.node_name = "none"
-        self.battery = "--"
-        self.rtt_ms = 0
+        self.battery = None
+        self.rtt_ms = None
         self.connected = False
         self.wifi_connected = False
         self.ws_connected = False
@@ -36,9 +36,11 @@ class StatusState:
         items = [
             "WiFi {}".format(short_text(self.wifi_ssid, 12)),
             "Route {}".format(self.route),
-            "Batt {}".format(self.battery),
-            "RTT {}ms".format(self.rtt_ms or 0),
         ]
+        if self.battery is not None:
+            items.append("Batt {}".format(self.battery))
+        if self.rtt_ms is not None:
+            items.append("RTT {}ms".format(self.rtt_ms))
         return items[self.rotation_index % len(items)]
 
     def wifi_rssi(self):
@@ -51,12 +53,10 @@ class StatusState:
         return None
 
     def full_rows(self):
-        return [
+        rows = [
             ("WiFi", short_text(self.wifi_ssid, 14)),
             ("Route", self.route),
             ("Node", short_text(self.node_name, 14)),
-            ("Battery", self.battery),
-            ("RTT", "{}ms".format(self.rtt_ms or 0)),
             ("WiFi", "ONLINE" if self.wifi_connected else "OFFLINE"),
             ("WSS", "ONLINE" if self.ws_connected else "OFFLINE"),
             ("Conn", "ONLINE" if self.connected else "OFFLINE"),
@@ -65,6 +65,13 @@ class StatusState:
             ("Managers", str(self.manager_count)),
             ("Error", short_text(self.last_error or "none", 14)),
         ]
+        insert_at = 3
+        if self.battery is not None:
+            rows.insert(insert_at, ("Battery", self.battery))
+            insert_at += 1
+        if self.rtt_ms is not None:
+            rows.insert(insert_at, ("RTT", "{}ms".format(self.rtt_ms)))
+        return rows
 
 
 def route_label(active_endpoint, source, connected, degraded=False):

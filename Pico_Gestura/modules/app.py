@@ -54,7 +54,10 @@ class RuntimeApp:
         self.endpoint_cache_path = env.get("ENDPOINT_CACHE_PATH", "endpoint_cache.json")
         self.ca_der_path = env.get("CA_DER_PATH", "")
         self.status = StatusState(env.get("WIFI_SSID", ""))
-        self.status.update(battery=env.get("BATTERY_LABEL", "--"))
+        self.battery_enabled = env_bool(env.get("BATTERY_ENABLED", "false"))
+        if self.battery_enabled:
+            battery_label = env.get("BATTERY_LABEL", "")
+            self.status.update(battery=battery_label if battery_label else None)
         if wifi_manager:
             self.status.update(
                 wifi_connected=wifi_manager.is_connected(),
@@ -307,6 +310,7 @@ class RuntimeApp:
         action = queued.get("action", {})
         if not self.active_endpoint:
             return False
+        started = time.ticks_ms()
         try:
             payload = {
                 "type": "mapped_action",
@@ -321,6 +325,7 @@ class RuntimeApp:
                 ca_der_path=self.ca_der_path,
                 timeout=self.http_action_timeout,
             )
+            self.status.update(rtt_ms=time.ticks_diff(time.ticks_ms(), started))
             self.messages_sent += 1
             self.last_successful_ws_send_ms = time.ticks_ms()
             if result.get("result"):
@@ -332,6 +337,7 @@ class RuntimeApp:
             self.state.mark_dirty()
             return True
         except Exception as exc:
+            self.status.update(rtt_ms=time.ticks_diff(time.ticks_ms(), started))
             self.messages_failed += 1
             self.status.update(last_error="HTTP action failed: {}".format(exc), degraded=True)
             if self.action_debug.should_print():
@@ -615,21 +621,28 @@ class RuntimeApp:
         if message_type == "mapped_action_ack":
             action_id = message.get("actionId", "")
             pending = self.pending_action_acks.get(action_id)
+            rtt_ms = None
             if pending is not None:
                 pending["acked"] = True
+                rtt_ms = time.ticks_diff(time.ticks_ms(), pending.get("sent_at", time.ticks_ms()))
+                self.status.update(rtt_ms=rtt_ms)
             if self.action_debug.enabled():
                 print(
                     "[DEBUG][action] ack accepted={} actionId={} mappingId={} rtt_ms={}".format(
                         bool(message.get("accepted", message.get("ok", False))),
                         action_id,
                         message.get("mappingId", ""),
-                        time.ticks_diff(time.ticks_ms(), pending.get("sent_at", time.ticks_ms())) if pending else "?",
+                        rtt_ms if rtt_ms is not None else "?",
                     )
                 )
             return
         if message_type == "mapped_action_result":
             action_id = message.get("actionId", "")
             pending = self.pending_action_acks.pop(action_id, None)
+            rtt_ms = None
+            if pending is not None:
+                rtt_ms = time.ticks_diff(time.ticks_ms(), pending.get("sent_at", time.ticks_ms()))
+                self.status.update(rtt_ms=rtt_ms)
             ok = bool(message.get("ok"))
             result = message.get("result", {}) or {}
             if ok:
@@ -640,7 +653,7 @@ class RuntimeApp:
                         ok,
                         action_id,
                         message.get("mappingId", ""),
-                        time.ticks_diff(time.ticks_ms(), pending.get("sent_at", time.ticks_ms())) if pending else "?",
+                        rtt_ms if rtt_ms is not None else "?",
                         safe_json(result),
                     )
                 )

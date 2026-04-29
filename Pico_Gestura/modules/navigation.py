@@ -261,12 +261,14 @@ class NavigationController:
 
     def wifi_items(self):
         status = self.state.status
-        return [
+        items = [
             {"label": "SSID {}".format(status.wifi_ssid), "kind": "info"},
             {"label": "Route {}".format(status.route), "kind": "info"},
-            {"label": "RTT {}ms".format(status.rtt_ms), "kind": "info"},
             {"label": "Cloud {}".format("OK" if status.connected else "OFF"), "kind": "info"},
         ]
+        if status.rtt_ms is not None:
+            items.insert(2, {"label": "RTT {}ms".format(status.rtt_ms), "kind": "info"})
+        return items
 
     def diagnostic_items(self):
         status = self.state.status

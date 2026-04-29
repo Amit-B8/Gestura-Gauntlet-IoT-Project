@@ -10,6 +10,7 @@ class LocalNodeCache {
 
   setConfigSnapshot(snapshot) {
     this.configSnapshot = clone(snapshot);
+    this.hydrateInventoryFromSnapshot(snapshot);
   }
 
   getConfigSnapshot() {
@@ -18,6 +19,19 @@ class LocalNodeCache {
 
   setManagerDevices(managerId, devices = []) {
     this.deviceInventory.set(managerId, devices.map(clone));
+  }
+
+  hydrateInventoryFromSnapshot(snapshot = {}) {
+    const devicesByManager = new Map();
+    for (const device of snapshot.devices || []) {
+      const managerId = device.managerId || device.provenance?.managerId;
+      if (!managerId) continue;
+      if (!devicesByManager.has(managerId)) devicesByManager.set(managerId, []);
+      devicesByManager.get(managerId).push(clone({ ...device, managerId }));
+    }
+    for (const [managerId, devices] of devicesByManager.entries()) {
+      this.deviceInventory.set(managerId, devices);
+    }
   }
 
   getAllDevices() {

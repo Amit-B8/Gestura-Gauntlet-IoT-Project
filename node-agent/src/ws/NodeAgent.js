@@ -33,6 +33,13 @@ class NodeAgent {
     this.pendingManagerSyncs = new Map();
     this.pendingManagerStatuses = new Map();
     this.heartbeatInterval = null;
+    this.centralActionFallbackEnabled = process.env.EDGE_CLOUD_ACTION_FALLBACK !== 'false';
+    this.centralPicoToken =
+      process.env.CENTRAL_PICO_API_TOKEN ||
+      process.env.PICO_API_TOKEN ||
+      process.env.PICO_SHARED_TOKEN ||
+      process.env.GLOVE_API_TOKEN ||
+      '';
     this.managerAttachmentServer = new ManagerAttachmentServer({
       port: managerAttachPort,
       token: managerToken,
@@ -242,17 +249,31 @@ class NodeAgent {
   }
 
   async executeGloveAction(action) {
-    const device = this.cache.getDeviceById?.(action.deviceId);
+    let device = this.cache.getDeviceById?.(action.deviceId);
     if (!device) {
-      return {
-        ok: false,
-        deviceId: action.deviceId,
-        capabilityId: action.capabilityId,
-        managerId: null,
-        targetUrl: null,
-        upstreamError: 'Device not cached on edge node',
-        message: 'Device not cached on edge node',
-      };
+      await this.hydrateConfigFromCentral(action.gloveId || 'primary_glove').catch((err) => {
+        debug('central config hydrate failed before fallback', err.message);
+      });
+      device = this.cache.getDeviceById?.(action.deviceId);
+      if (!device) {
+        if (this.centralActionFallbackEnabled) {
+          return this.forwardGloveActionToCentral(action, {
+            reason: 'Device not cached on edge node',
+            gloveId: action.gloveId || 'primary_glove',
+            actionId: action.actionId,
+          });
+        }
+        return {
+          ok: false,
+          deviceId: action.deviceId,
+          capabilityId: action.capabilityId,
+          managerId: null,
+          targetUrl: null,
+          upstreamError: 'Device not cached on edge node',
+          message: 'Device not cached on edge node',
+          fallbackDisabled: true,
+        };
+      }
     }
     const manager = this.managers.get(device.managerId);
     const managerInfo = manager?.getInfo?.() || {};
@@ -327,6 +348,101 @@ class NodeAgent {
         targetUrl,
         upstreamError: err.message,
         message: err.message,
+      };
+    }
+  }
+
+  async hydrateConfigFromCentral(gloveId = 'primary_glove') {
+    if (!this.centralApiUrl) return null;
+    const url = `${String(this.centralApiUrl).replace(/\/$/, '')}/api/gloves/${encodeURIComponent(gloveId)}/config`;
+    const response = await fetch(url, {
+      headers: this.centralPicoToken ? { 'x-pico-token': this.centralPicoToken } : {},
+    });
+    if (!response.ok) {
+      throw new Error(`central config hydrate failed with ${response.status}`);
+    }
+    const config = await response.json();
+    this.cache.setConfigSnapshot(config);
+    return config;
+  }
+
+  async forwardGloveActionToCentral(action, { reason, gloveId = 'primary_glove', actionId } = {}) {
+    if (!this.centralApiUrl) {
+      return {
+        ok: false,
+        deviceId: action.deviceId,
+        capabilityId: action.capabilityId,
+        managerId: null,
+        targetUrl: null,
+        upstreamError: `${reason}; CENTRAL_API_URL is not configured`,
+        message: `${reason}; cloud fallback unavailable`,
+      };
+    }
+
+    const targetUrl = `${String(this.centralApiUrl).replace(/\/$/, '')}/api/gloves/${encodeURIComponent(gloveId)}/actions/${encodeURIComponent(action.deviceId)}/${encodeURIComponent(action.capabilityId)}`;
+    const startedAt = Date.now();
+    try {
+      const response = await fetch(targetUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(this.centralPicoToken ? { 'x-pico-token': this.centralPicoToken } : {}),
+        },
+        body: JSON.stringify({
+          type: 'mapped_action',
+          gloveId,
+          actionId,
+          action: stripEdgeOnlyActionFields(action),
+          ...stripEdgeOnlyActionFields(action),
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      const result = payload.result || payload;
+      const errorMessage =
+        typeof payload.error === 'string'
+          ? payload.error
+          : payload.error?.message || result?.message || response.statusText;
+      this.telemetry.record({
+        eventType: 'route_attempt',
+        payload: {
+          nodeId: this.node.id,
+          deviceId: action.deviceId,
+          target_device_id: action.deviceId,
+          attemptedRoute: 'lan',
+          finalRoute: 'public',
+          route_path: 'edge_cloud_fallback',
+          fallback_used: true,
+          success: response.ok && result?.ok !== false,
+          action_success: response.ok && result?.ok !== false,
+          latencyMs: Date.now() - startedAt,
+          route_latency_ms: Date.now() - startedAt,
+          message: result?.message || payload.error?.message,
+          failure_reason: response.ok ? undefined : errorMessage,
+        },
+      });
+      return {
+        ...result,
+        ok: response.ok && result?.ok !== false,
+        deviceId: result?.deviceId || action.deviceId,
+        capabilityId: result?.capabilityId || action.capabilityId,
+        managerId: result?.managerId || payload.error?.managerId || null,
+        targetUrl,
+        upstreamStatus: response.status,
+        upstreamError: response.ok ? undefined : errorMessage,
+        message: result?.message || errorMessage,
+        fallbackUsed: true,
+        fallbackReason: reason,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        deviceId: action.deviceId,
+        capabilityId: action.capabilityId,
+        managerId: null,
+        targetUrl,
+        upstreamError: err.message,
+        message: `${reason}; cloud fallback failed: ${err.message}`,
+        fallbackUsed: true,
       };
     }
   }
@@ -465,4 +581,9 @@ function firstInterfaceUrl(managerInfo = {}) {
     (left, right) => (left.priority ?? 100) - (right.priority ?? 100)
   )[0];
   return first?.actionHttpUrl || first?.url || null;
+}
+
+function stripEdgeOnlyActionFields(action = {}) {
+  const { gloveId, actionId, ...rest } = action;
+  return rest;
 }
