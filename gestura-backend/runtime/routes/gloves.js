@@ -1,6 +1,6 @@
 const express = require('express');
 
-function createGlovesRouter({ gloveConfigService }) {
+function createGlovesRouter({ gloveConfigService, actionRouter, statusSocketHub }) {
   const router = express.Router();
 
   router.get('/', (_req, res) => {
@@ -41,6 +41,42 @@ function createGlovesRouter({ gloveConfigService }) {
 
   router.post('/:gloveId/passive-metrics', async (req, res) => {
     res.json(await gloveConfigService.ingestPassiveMetrics(req.params.gloveId, req.body?.metrics || []));
+  });
+
+  router.post('/:gloveId/actions/:deviceId/:capabilityId', async (req, res) => {
+    const action = {
+      ...(req.body?.action || req.body || {}),
+      deviceId: req.params.deviceId,
+      capabilityId: req.params.capabilityId,
+    };
+    const actionId = req.body?.actionId;
+    try {
+      const result = await actionRouter.execute(action);
+      statusSocketHub?.broadcast?.('device.state', {
+        source: 'glove-http',
+        gloveId: req.params.gloveId,
+        actionId,
+        mappingId: action.mappingId,
+        deviceId: result?.deviceId || action.deviceId,
+        capabilityId: result?.capabilityId || action.capabilityId,
+        result,
+      });
+      res.status(result?.ok === false ? 502 : 200).json({
+        ok: Boolean(result?.ok),
+        gloveId: req.params.gloveId,
+        actionId,
+        mappingId: action.mappingId,
+        result,
+      });
+    } catch (err) {
+      res.status(err.status || 502).json({
+        ok: false,
+        gloveId: req.params.gloveId,
+        actionId,
+        error: err.message || 'Action failed',
+        code: err.code || 'ACTION_FAILED',
+      });
+    }
   });
 
   return router;

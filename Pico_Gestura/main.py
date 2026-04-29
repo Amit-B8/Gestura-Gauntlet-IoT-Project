@@ -71,10 +71,18 @@ async def main():
     app = RuntimeApp(env, mpu, input_reader, wifi_manager=wifi_manager)
     renderer = SSD1306Renderer(i2c)
     app.start_background_tasks()
+    asyncio.create_task(fsr_loop(app, input_reader, fsr_debug))
+    asyncio.create_task(ui_loop(app, renderer))
 
     while True:
+        await asyncio.sleep_ms(1000)
+
+
+async def fsr_loop(app, input_reader, fsr_debug):
+    while True:
+        started = time.ticks_ms()
         input_events = input_reader.read()
-        if input_events and fsr_debug.enabled():
+        if input_events and fsr_debug.should_print():
             for event in input_events:
                 print(
                     "[DEBUG][fsr] generated event={} source={} duration_ms={}".format(
@@ -88,28 +96,32 @@ async def main():
             top = snapshot["top"]
             bottom = snapshot["bottom"]
             print(
-                "[DEBUG][fsr] top(pin={}, raw={}, v={:.3f}, smooth={:.3f}, pct={:.1f}, state={}/{}, full>={:.3f}) bottom(pin={}, raw={}, v={:.3f}, smooth={:.3f}, pct={:.1f}, state={}/{}, full>={:.3f})".format(
+                "[DEBUG][fsr] top(pin={}, raw={}, pct={:.1f}, state={}/{}) bottom(pin={}, raw={}, pct={:.1f}, state={}/{})".format(
                     top.get("pin", "?"),
                     top.get("raw", 0),
-                    top.get("voltage", 0.0),
-                    top.get("smoothed_voltage", 0.0),
                     top.get("pressure", 0.0),
                     top.get("state", "?"),
                     top.get("state_label", "?"),
-                    top.get("full_threshold", 0.0),
                     bottom.get("pin", "?"),
                     bottom.get("raw", 0),
-                    bottom.get("voltage", 0.0),
-                    bottom.get("smoothed_voltage", 0.0),
                     bottom.get("pressure", 0.0),
                     bottom.get("state", "?"),
                     bottom.get("state_label", "?"),
-                    bottom.get("full_threshold", 0.0),
                 )
             )
-        await app.update(input_events)
+        app.handle_input_events(input_events)
+        app.record_loop_timing("fsr_loop_ms", started)
+        elapsed = time.ticks_diff(time.ticks_ms(), started)
+        await asyncio.sleep_ms(max(0, app.fsr_loop_interval_ms - elapsed))
+
+
+async def ui_loop(app, renderer):
+    while True:
+        started = time.ticks_ms()
         renderer.render_if_dirty(app.state)
-        await asyncio.sleep_ms(25)
+        app.record_loop_timing("ui_loop_ms", started)
+        elapsed = time.ticks_diff(time.ticks_ms(), started)
+        await asyncio.sleep_ms(max(0, app.ui_loop_interval_ms - elapsed))
 
 def build_fsr(env, prefix, default_pin):
     return FSR(

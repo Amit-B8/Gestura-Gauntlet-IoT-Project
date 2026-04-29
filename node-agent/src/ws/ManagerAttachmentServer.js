@@ -56,6 +56,35 @@ class ManagerAttachmentServer {
       }
       res.json(snapshot.endpoints);
     });
+    this.app.post('/api/gloves/:gloveId/actions/:deviceId/:capabilityId', async (req, res) => {
+      if (!this.hasValidPicoHttpToken(req)) {
+        res.status(401).json({ ok: false, error: 'Unauthorized' });
+        return;
+      }
+      const action = {
+        ...(req.body?.action || req.body || {}),
+        deviceId: req.params.deviceId,
+        capabilityId: req.params.capabilityId,
+      };
+      const actionId = req.body?.actionId;
+      try {
+        const result = await this.onGloveAction?.(action);
+        res.status(result?.ok === false ? 502 : 200).json({
+          ok: Boolean(result?.ok),
+          gloveId: req.params.gloveId,
+          actionId,
+          mappingId: action.mappingId,
+          result,
+        });
+      } catch (err) {
+        res.status(502).json({
+          ok: false,
+          gloveId: req.params.gloveId,
+          actionId,
+          error: err.message || 'Action failed',
+        });
+      }
+    });
 
     this.io.on('connection', (socket) => {
       socket.on('manager:attach', async (payload = {}, ack) => {
@@ -198,6 +227,14 @@ class ManagerAttachmentServer {
       }
     }
     return requested;
+  }
+
+  hasValidPicoHttpToken(req) {
+    const expectedToken = process.env.PICO_API_TOKEN || '';
+    if (!expectedToken) return true;
+    const auth = req.get?.('authorization') || '';
+    const bearer = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : '';
+    return req.query?.api_key === expectedToken || bearer === expectedToken;
   }
 }
 

@@ -74,11 +74,11 @@ def route_label(active_endpoint, source, connected, degraded=False):
     src = str(source or "").lower()
     if degraded:
         return "OFFLINE"
-    if src == "edge" and endpoint.startswith("ws://"):
+    if (src == "edge" or src == "websocket") and (endpoint.startswith("ws://") or endpoint.startswith("http://")):
         return "LAN EDGE"
-    if src == "edge":
+    if (src == "edge" or src == "websocket"):
         return "PUB EDGE"
-    if endpoint.startswith("wss://"):
+    if endpoint.startswith("wss://") or endpoint.startswith("https://"):
         return "CLOUD"
     return "PUB EDGE"
 

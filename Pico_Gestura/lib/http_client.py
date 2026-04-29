@@ -14,6 +14,33 @@ from lib.env import parse_ws_url
 
 
 def get_json(url, headers=None, ca_der_path=None, timeout=5):
+    request_headers = {"Accept": "application/json"}
+    for key, value in (headers or {}).items():
+        request_headers[key] = value
+    status, body = request("GET", url, headers=request_headers, ca_der_path=ca_der_path, timeout=timeout)
+    if status < 200 or status >= 300:
+        raise RuntimeError("GET {} failed with {}".format(url, status))
+    return ujson.loads(body)
+
+
+def post_json(url, payload, headers=None, ca_der_path=None, timeout=5):
+    request_headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    for key, value in (headers or {}).items():
+        request_headers[key] = value
+    status, body = request(
+        "POST",
+        url,
+        body=ujson.dumps(payload),
+        headers=request_headers,
+        ca_der_path=ca_der_path,
+        timeout=timeout,
+    )
+    if status < 200 or status >= 300:
+        raise RuntimeError("POST {} failed with {}".format(url, status))
+    return ujson.loads(body) if body else {"ok": True}
+
+
+def request(method, url, body=None, headers=None, ca_der_path=None, timeout=5):
     parsed = parse_http_url(url)
     sock = open_socket(parsed, ca_der_path=ca_der_path, timeout=timeout)
     try:
@@ -21,27 +48,28 @@ def get_json(url, headers=None, ca_der_path=None, timeout=5):
         if parsed["port"] not in (80, 443):
             host = "{}:{}".format(parsed["host"], parsed["port"])
 
-        request = [
-            "GET {} HTTP/1.1".format(parsed["path"]),
+        encoded_body = body.encode("utf-8") if isinstance(body, str) else body
+
+        request_lines = [
+            "{} {} HTTP/1.1".format(method, parsed["path"]),
             "Host: {}".format(host),
             "Connection: close",
-            "Accept: application/json",
         ]
 
         for key, value in (headers or {}).items():
-            request.append("{}: {}".format(key, value))
+            request_lines.append("{}: {}".format(key, value))
+        if encoded_body:
+            request_lines.append("Content-Length: {}".format(len(encoded_body)))
 
-        request.append("")
-        request.append("")
+        request_lines.append("")
+        request_lines.append("")
 
-        sock.write("\r\n".join(request).encode("utf-8"))
+        sock.write("\r\n".join(request_lines).encode("utf-8"))
+        if encoded_body:
+            sock.write(encoded_body)
 
         status, body = read_response(sock)
-
-        if status < 200 or status >= 300:
-            raise RuntimeError("GET {} failed with {}".format(url, status))
-
-        return ujson.loads(body)
+        return status, body
 
     finally:
         sock.close()

@@ -182,7 +182,10 @@ class SimpleWebSocketClient:
         if self.sock is None:
             return None
 
-        # self.sock.settimeout(timeout)
+        try:
+            self.sock.settimeout(timeout)
+        except Exception:
+            pass
         try:
             opcode, payload = self.read_frame()
         except OSError:

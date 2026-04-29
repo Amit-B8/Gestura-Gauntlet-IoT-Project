@@ -6,7 +6,7 @@ import uasyncio as asyncio
 
 from lib.endpoint_cache import EndpointCache
 from lib.env import http_to_ws_url, ws_to_http_url
-from lib.http_client import get_json
+from lib.http_client import get_json, post_json
 from lib.websocket_client import SimpleWebSocketClient
 from modules.debug import DebugPrinter
 from modules.device_models import normalize_devices, normalize_managers
@@ -36,11 +36,21 @@ class RuntimeApp:
         self.ws_failed_send_cooldown_ms = int(env.get("WS_FAILED_SEND_COOLDOWN_MS", "5000"))
         self.ws_reconnect_base_delay_ms = int(env.get("WS_RECONNECT_BASE_DELAY_MS", "1000"))
         self.ws_reconnect_max_delay_ms = int(env.get("WS_RECONNECT_MAX_DELAY_MS", "60000"))
+        self.ws_connect_timeout_sec = float(env.get("WS_CONNECT_TIMEOUT_SEC", "1.0"))
         self.ws_soak_test = env_bool(env.get("WS_SOAK_TEST", "false"))
         self.passive_metrics_enabled = False
         if self.ws_soak_test:
             self.ws_heartbeat_ms = max(self.ws_heartbeat_ms, 30000)
         self.action_ack_timeout_ms = int(env.get("ACTION_ACK_TIMEOUT_MS", "5000"))
+        self.fsr_loop_interval_ms = int(env.get("FSR_LOOP_INTERVAL_MS", "20"))
+        self.ui_loop_interval_ms = int(env.get("UI_LOOP_INTERVAL_MS", "150"))
+        self.network_loop_interval_ms = int(env.get("NETWORK_LOOP_INTERVAL_MS", "20"))
+        self.action_queue_max = int(env.get("ACTION_QUEUE_MAX", "16"))
+        self.action_queue_timeout_ms = int(env.get("ACTION_QUEUE_TIMEOUT_MS", "8000"))
+        self.action_transport = str(env.get("PICO_ACTION_TRANSPORT", "auto") or "auto").lower()
+        self.http_action_fallback = env_bool(env.get("PICO_HTTP_ACTION_FALLBACK", "true"))
+        self.http_action_timeout = float(env.get("PICO_HTTP_ACTION_TIMEOUT_SEC", "1.0"))
+        self.timing_log_interval_ms = int(env.get("TIMING_LOG_INTERVAL_MS", "5000"))
         self.endpoint_cache_path = env.get("ENDPOINT_CACHE_PATH", "endpoint_cache.json")
         self.ca_der_path = env.get("CA_DER_PATH", "")
         self.status = StatusState(env.get("WIFI_SSID", ""))
@@ -95,8 +105,16 @@ class RuntimeApp:
         self.next_ws_connect_allowed_ms = 0
         self.last_action_values = {}
         self.action_seq = 0
+        self.action_queue = []
         self.pending_action_acks = {}
         self.background_tasks = []
+        self.loop_timing = {
+            "fsr_loop_ms": 0,
+            "ui_loop_ms": 0,
+            "network_loop_ms": 0,
+            "max_loop_block_ms": 0,
+            "last_log_ms": time.ticks_ms(),
+        }
 
     def start_background_tasks(self):
         self.background_tasks = [
@@ -107,31 +125,42 @@ class RuntimeApp:
         return self.background_tasks
 
     async def update(self, input_events):
+        self.handle_input_events(input_events)
+        await asyncio.sleep_ms(0)
+
+    def handle_input_events(self, input_events):
         self.sensor["pressure"] = self.input_reader.bottom_pressure()
         self.navigation.handle_events(input_events)
-        if self.wifi_manager:
-            if self.state.wifi_reconnect_requested:
-                self.status.update(wifi_connected=False, connected=False, ws_connected=False, route="OFFLINE")
-                if self.wifi_manager.connect_best(timeout_sec=10):
-                    self.status.update(wifi_ssid=self.wifi_manager.current_ssid(), wifi_connected=True, last_error="")
-                    self.active_endpoint = None
-                self.state.wifi_reconnect_requested = False
-                self.state.mark_dirty()
-            elif self.wifi_manager.override_ssid and self.wifi_manager.current_ssid() != self.wifi_manager.override_ssid:
-                self.status.update(wifi_connected=False, connected=False, ws_connected=False, route="OFFLINE")
-                if self.wifi_manager.connect_override():
-                    self.status.update(wifi_ssid=self.wifi_manager.current_ssid(), wifi_connected=True, last_error="")
-                    self.active_endpoint = None
-                self.state.mark_dirty()
         for action in self.navigation.pop_pending_actions():
-            if self.ws_soak_test:
-                if self.action_debug.enabled():
-                    print("[DEBUG][action] skipped reason=ws_soak_test")
-                continue
-            if self.action_debug.enabled():
-                print("[DEBUG][action] dequeued {}".format(safe_json(action)))
-            self.send_action(action)
-        await asyncio.sleep_ms(0)
+            self.enqueue_action(action, "ui")
+
+    def enqueue_action(self, action, source="input"):
+        if self.ws_soak_test:
+            if self.action_debug.should_print():
+                print("[DEBUG][action] skipped reason=ws_soak_test")
+            return False
+        now = time.ticks_ms()
+        if len(self.action_queue) >= self.action_queue_max:
+            dropped = self.action_queue.pop(0)
+            self.messages_failed += 1
+            if self.action_debug.should_print():
+                print("[DEBUG][action] queue_drop oldest age_ms={}".format(
+                    time.ticks_diff(now, dropped.get("queued_at", now)),
+                ))
+        self.action_seq += 1
+        action_id = "{}-{}".format(now, self.action_seq)
+        self.action_queue.append({
+            "id": action_id,
+            "action": action,
+            "queued_at": now,
+            "source": source,
+            "attempts": 0,
+        })
+        self.state.message = "Action queued"
+        self.state.mark_dirty()
+        if self.action_debug.should_print():
+            print("[DEBUG][action] queued id={} depth={} {}".format(action_id, len(self.action_queue), describe_action(action)))
+        return True
 
     def send_action(self, action):
         if self.action_debug.enabled():
@@ -212,6 +241,99 @@ class RuntimeApp:
                 )
             return False
 
+    def consume_queued_action(self, now):
+        if not self.action_queue:
+            return False
+        queued = self.action_queue[0]
+        age_ms = time.ticks_diff(now, queued.get("queued_at", now))
+        if age_ms > self.action_queue_timeout_ms:
+            self.action_queue.pop(0)
+            self.messages_failed += 1
+            self.status.update(last_error="Action queue timeout")
+            self.state.message = "Action expired"
+            self.state.mark_dirty()
+            if self.action_debug.should_print():
+                print("[DEBUG][action] expired id={} age_ms={}".format(queued.get("id"), age_ms))
+            return True
+
+        if self.action_transport == "http":
+            ok = self.send_action_http(queued)
+        elif self.action_transport == "ws":
+            ok = self.send_action_ws_queued(queued)
+        elif self.endpoint_uses_http():
+            ok = self.send_action_http(queued)
+        else:
+            ok = self.send_action_ws_queued(queued)
+            if not ok and self.http_action_fallback:
+                ok = self.send_action_http(queued)
+
+        if ok:
+            self.action_queue.pop(0)
+        else:
+            queued["attempts"] = int(queued.get("attempts", 0)) + 1
+        return True
+
+    def send_action_ws_queued(self, queued):
+        if not self.socket_ready():
+            return False
+        action = queued.get("action", {})
+        payload = {
+            "type": "mapped_action",
+            "gloveId": self.glove_id,
+            "ts": time.ticks_ms(),
+            "actionId": queued.get("id"),
+            "action": action,
+        }
+        try:
+            self.send_ws_json(payload, "mapped_action")
+            self.pending_action_acks[queued.get("id")] = {
+                "sent_at": time.ticks_ms(),
+                "action": action,
+                "acked": False,
+            }
+            self.state.message = "Sent {}".format(action.get("capabilityId", "action"))
+            self.state.mark_dirty()
+            return True
+        except Exception as exc:
+            self.messages_failed += 1
+            self.mark_ws_unhealthy("queued_send", exc)
+            return False
+
+    def send_action_http(self, queued):
+        action = queued.get("action", {})
+        if not self.active_endpoint:
+            return False
+        try:
+            payload = {
+                "type": "mapped_action",
+                "gloveId": self.glove_id,
+                "actionId": queued.get("id"),
+                "action": action,
+            }
+            payload.update(action)
+            result = post_json(
+                self.with_pico_auth(self.action_url_for_endpoint(self.active_endpoint, action)),
+                payload,
+                ca_der_path=self.ca_der_path,
+                timeout=self.http_action_timeout,
+            )
+            self.messages_sent += 1
+            self.last_successful_ws_send_ms = time.ticks_ms()
+            if result.get("result"):
+                self.apply_confirmed_action_result(result.get("result") or {})
+            elif result.get("deviceId") and result.get("capabilityId"):
+                self.apply_confirmed_action_result(result)
+            self.status.update(connected=True, last_error="", degraded=False)
+            self.state.message = "Sent {}".format(action.get("capabilityId", "action"))
+            self.state.mark_dirty()
+            return True
+        except Exception as exc:
+            self.messages_failed += 1
+            self.status.update(last_error="HTTP action failed: {}".format(exc), degraded=True)
+            if self.action_debug.should_print():
+                print("[DEBUG][action] http failed id={} error={}".format(queued.get("id"), repr(exc)))
+            return False
+
     async def network_task(self):
         reconnect_delay_ms = self.ws_reconnect_base_delay_ms
         last_action_ms = 0
@@ -230,8 +352,42 @@ class RuntimeApp:
                     reconnect_delay_ms = min(self.ws_reconnect_max_delay_ms, reconnect_delay_ms * 2)
                     continue
 
+                if self.endpoint_uses_http() or self.action_transport == "http":
+                    current_ms = time.ticks_ms()
+                    self.set_connection(True, "HTTP")
+                    self.consume_queued_action(current_ms)
+                    if (
+                        not self.ws_soak_test
+                        and self.state.mode == "ACTIVE"
+                        and time.ticks_diff(current_ms, last_action_ms) >= self.action_send_interval_ms
+                    ):
+                        for action in self.build_mapped_actions():
+                            self.enqueue_action(action, "mapping")
+                        last_action_ms = current_ms
+                    if (
+                        time.ticks_diff(current_ms, last_config_refresh_ms) >= 60_000
+                        and not self.runtime_config_loaded
+                    ):
+                        self.log_config_refetch_reason("no_config")
+                        self.refresh_runtime_config("no_config")
+                        last_config_refresh_ms = current_ms
+                    self.record_loop_timing("network_loop_ms", current_ms)
+                    await asyncio.sleep_ms(self.network_loop_interval_ms)
+                    continue
+
                 if not self.socket_ready():
                     if not self.connect_ws("receive_channel"):
+                        current_ms = time.ticks_ms()
+                        if (
+                            not self.ws_soak_test
+                            and self.state.mode == "ACTIVE"
+                            and time.ticks_diff(current_ms, last_action_ms) >= self.action_send_interval_ms
+                        ):
+                            for action in self.build_mapped_actions():
+                                self.enqueue_action(action, "mapping")
+                            last_action_ms = current_ms
+                        self.consume_queued_action(current_ms)
+                        self.record_loop_timing("network_loop_ms", current_ms)
                         await asyncio.sleep_ms(self.ws_connect_backoff_ms())
                         continue
                 reconnect_delay_ms = self.ws_reconnect_base_delay_ms
@@ -298,10 +454,12 @@ class RuntimeApp:
                         and time.ticks_diff(current_ms, last_action_ms) >= self.action_send_interval_ms
                     ):
                         for action in self.build_mapped_actions():
-                            if self.action_debug.enabled():
+                            if self.action_debug.should_print():
                                 print("[DEBUG][action] mapped from imu {}".format(safe_json(action)))
-                            self.send_action(action)
+                            self.enqueue_action(action, "mapping")
                             last_action_ms = current_ms
+
+                    self.consume_queued_action(current_ms)
 
                     if (
                         time.ticks_diff(current_ms, last_config_refresh_ms) >= 60_000
@@ -335,7 +493,8 @@ class RuntimeApp:
                     await asyncio.sleep_ms(self.ws_connect_backoff_ms())
                     break
 
-                await asyncio.sleep_ms(20)
+                self.record_loop_timing("network_loop_ms", current_ms)
+                await asyncio.sleep_ms(self.network_loop_interval_ms)
 
     async def sensor_task(self):
         while True:
@@ -376,6 +535,23 @@ class RuntimeApp:
     async def wifi_task(self):
         while True:
             if self.wifi_manager:
+                if self.state.wifi_reconnect_requested:
+                    self.status.update(wifi_connected=False, connected=False, ws_connected=False, route="OFFLINE")
+                    if self.wifi_manager.override_ssid:
+                        connected = self.wifi_manager.connect_override()
+                    else:
+                        connected = self.wifi_manager.connect_best(timeout_sec=5)
+                    if connected:
+                        self.status.update(wifi_ssid=self.wifi_manager.current_ssid(), wifi_connected=True, last_error="")
+                        self.active_endpoint = None
+                    self.state.wifi_reconnect_requested = False
+                    self.state.mark_dirty()
+                elif self.wifi_manager.override_ssid and self.wifi_manager.current_ssid() != self.wifi_manager.override_ssid:
+                    self.status.update(wifi_connected=False, connected=False, ws_connected=False, route="OFFLINE")
+                    if self.wifi_manager.connect_override():
+                        self.status.update(wifi_ssid=self.wifi_manager.current_ssid(), wifi_connected=True, last_error="")
+                        self.active_endpoint = None
+                    self.state.mark_dirty()
                 if self.wifi_debug.should_print():
                     print(
                         "[DEBUG][wifi] status={} connected={} ssid={} ifconfig={} route={} endpoint={}".format(
@@ -545,6 +721,11 @@ class RuntimeApp:
             "rtt_ms": self.status.rtt_ms,
             "messages_sent": self.messages_sent,
             "messages_failed": self.messages_failed,
+            "action_queue_depth": len(self.action_queue),
+            "fsr_loop_ms": self.loop_timing.get("fsr_loop_ms", 0),
+            "ui_loop_ms": self.loop_timing.get("ui_loop_ms", 0),
+            "network_loop_ms": self.loop_timing.get("network_loop_ms", 0),
+            "max_loop_block_ms": self.loop_timing.get("max_loop_block_ms", 0),
         }
 
     def bootstrap_runtime_config(self):
@@ -692,13 +873,19 @@ class RuntimeApp:
         return changed
 
     def set_connection(self, connected, message):
+        changed = (
+            self.status.connected != connected
+            or self.status.ws_connected != connected
+            or self.state.message != message
+        )
         self.status.update(
             connected=connected,
             ws_connected=connected,
             route=route_label(self.active_endpoint, self.config_source, connected),
         )
         self.state.message = message
-        self.state.mark_dirty()
+        if changed:
+            self.state.mark_dirty()
         if self.ws_debug.enabled():
             print(
                 "[DEBUG][ws] connection connected={} message={} route={} endpoint={} last_error={}".format(
@@ -741,7 +928,7 @@ class RuntimeApp:
                     self.active_endpoint,
                     redact_url(ws_url),
                 ))
-            self.transport = SimpleWebSocketClient(ws_url, ca_der_path=self.ca_der_path)
+            self.transport = SimpleWebSocketClient(ws_url, timeout=self.ws_connect_timeout_sec, ca_der_path=self.ca_der_path)
             self.transport.connect()
             self.ws_connected_at_ms = time.ticks_ms()
             self.sync_transport_activity()
@@ -1060,6 +1247,24 @@ class RuntimeApp:
                 )
             )
 
+    def record_loop_timing(self, key, started_ms):
+        duration = time.ticks_diff(time.ticks_ms(), started_ms)
+        self.loop_timing[key] = duration
+        if duration > self.loop_timing.get("max_loop_block_ms", 0):
+            self.loop_timing["max_loop_block_ms"] = duration
+        now = time.ticks_ms()
+        if time.ticks_diff(now, self.loop_timing.get("last_log_ms", now)) >= self.timing_log_interval_ms:
+            self.loop_timing["last_log_ms"] = now
+            print(
+                "[TIMING] fsr_loop_ms={} ui_loop_ms={} network_loop_ms={} max_loop_block_ms={}".format(
+                    self.loop_timing.get("fsr_loop_ms", 0),
+                    self.loop_timing.get("ui_loop_ms", 0),
+                    self.loop_timing.get("network_loop_ms", 0),
+                    self.loop_timing.get("max_loop_block_ms", 0),
+                )
+            )
+            self.loop_timing["max_loop_block_ms"] = 0
+
     def build_glove_ws_url(self, base_url=None):
         source_url = base_url or self.glove_ws_url
         url = http_to_ws_url(source_url).split("?", 1)[0]
@@ -1077,6 +1282,10 @@ class RuntimeApp:
 
     def fetch_json(self, url):
         return get_json(self.with_pico_auth(url), ca_der_path=self.ca_der_path)
+
+    def endpoint_uses_http(self):
+        endpoint = self.active_endpoint or self.glove_ws_url
+        return str(endpoint).startswith("http://") or str(endpoint).startswith("https://")
 
     def _wifi_status_code(self):
         try:
@@ -1102,13 +1311,24 @@ class RuntimeApp:
             http_url = http_url[:-len("/glove")]
         return "{}/api/gloves/{}/config".format(http_url, self.glove_id)
 
+    def action_url_for_endpoint(self, endpoint_url, action):
+        http_url = ws_to_http_url(endpoint_url).split("?", 1)[0].rstrip("/")
+        if http_url.endswith("/glove"):
+            http_url = http_url[:-len("/glove")]
+        return "{}/api/gloves/{}/actions/{}/{}".format(
+            http_url,
+            self.glove_id,
+            action.get("deviceId", ""),
+            action.get("capabilityId", ""),
+        )
+
 
 def is_allowed_endpoint(interface):
     url = interface.get("url", "")
     kind = interface.get("kind", "")
-    if url.startswith("wss://"):
+    if url.startswith("wss://") or url.startswith("https://"):
         return True
-    return kind == "lan" and url.startswith("ws://")
+    return kind == "lan" and (url.startswith("ws://") or url.startswith("http://"))
 
 
 def first_node_name(endpoints):
