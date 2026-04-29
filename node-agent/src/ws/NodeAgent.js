@@ -284,6 +284,7 @@ class NodeAgent {
           reason: `Manager ${device.managerId} is not attached`,
           gloveId: action.gloveId || 'primary_glove',
           actionId: action.actionId,
+          managerId: device.managerId,
         });
       }
       return {
@@ -373,7 +374,7 @@ class NodeAgent {
     return config;
   }
 
-  async forwardGloveActionToCentral(action, { reason, gloveId = 'primary_glove', actionId } = {}) {
+  async forwardGloveActionToCentral(action, { reason, gloveId = 'primary_glove', actionId, managerId } = {}) {
     if (!this.centralApiUrl) {
       return {
         ok: false,
@@ -401,6 +402,7 @@ class NodeAgent {
           actionId,
           action: stripEdgeOnlyActionFields(action),
           ...stripEdgeOnlyActionFields(action),
+          managerId: managerId || action.managerId,
         }),
       });
       const payload = await response.json().catch(() => ({}));
@@ -413,6 +415,7 @@ class NodeAgent {
         eventType: 'route_attempt',
         payload: {
           nodeId: this.node.id,
+          managerId: managerId || action.managerId,
           deviceId: action.deviceId,
           target_device_id: action.deviceId,
           attemptedRoute: 'lan',
@@ -432,7 +435,7 @@ class NodeAgent {
         ok: response.ok && result?.ok !== false,
         deviceId: result?.deviceId || action.deviceId,
         capabilityId: result?.capabilityId || action.capabilityId,
-        managerId: result?.managerId || payload.error?.managerId || null,
+        managerId: result?.managerId || payload.error?.managerId || managerId || action.managerId || null,
         targetUrl,
         upstreamStatus: response.status,
         upstreamError: response.ok ? undefined : errorMessage,

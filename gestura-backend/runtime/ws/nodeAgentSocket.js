@@ -136,8 +136,13 @@ function registerNodeAgentSocket(io, services) {
     });
 
     socket.on('route:metric', async (metric = {}, ack) => {
-      const recorded = await services.routeMetricsService.record(metric);
-      ack?.({ ok: true, metric: recorded });
+      try {
+        const recorded = await services.routeMetricsService.record(metric);
+        ack?.({ ok: true, metric: recorded });
+      } catch (err) {
+        console.error('[NodeSocket] route metric failed:', err.message);
+        ack?.({ ok: false, error: err.message });
+      }
     });
 
     socket.on('telemetry:batch', async (payload = {}, ack) => {

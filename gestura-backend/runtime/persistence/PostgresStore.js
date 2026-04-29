@@ -443,7 +443,7 @@ class PostgresStore {
       `,
       [
         metric.id,
-        metric.managerId,
+        metric.managerId || 'unknown',
         metric.nodeId || null,
         metric.deviceId || null,
         metric.attemptedRoute || 'public',

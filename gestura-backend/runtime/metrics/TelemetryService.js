@@ -2,10 +2,11 @@ const { randomUUID } = require('crypto');
 const { clone } = require('../utils');
 
 class TelemetryService {
-  constructor({ persistence, telemetrySink, maxBuffered = 1000 } = {}) {
+  constructor({ persistence, telemetrySink, maxBuffered = 1000, deviceRegistry } = {}) {
     this.persistence = persistence;
     this.telemetrySink = telemetrySink;
     this.maxBuffered = maxBuffered;
+    this.deviceRegistry = deviceRegistry;
     this.events = [];
   }
 
@@ -18,16 +19,25 @@ class TelemetryService {
       this.events.splice(0, this.events.length - this.maxBuffered);
     }
 
-    await this.persistence?.saveTelemetryEvents?.(normalized);
+    try {
+      await this.persistence?.saveTelemetryEvents?.(normalized);
+    } catch (err) {
+      console.error(`[Telemetry] Event persistence failed: ${err.message}`);
+    }
     for (const event of normalized) {
       if (event.eventType === 'route_attempt') {
-        await this.persistence?.saveRouteAttemptMetric?.({
+        const metric = this.normalizeRouteMetric({
           id: event.id,
           ts: event.ts,
           ...(event.payload || {}),
           nodeId: event.nodeId || event.payload?.nodeId,
           managerId: event.managerId || event.payload?.managerId,
         });
+        try {
+          await this.persistence?.saveRouteAttemptMetric?.(metric);
+        } catch (err) {
+          console.error('[Telemetry] Route metric persistence failed:', compactMetricError(err, metric));
+        }
       }
     }
 
@@ -48,6 +58,16 @@ class TelemetryService {
       .filter((event) => !eventType || event.eventType === eventType)
       .map(clone);
   }
+
+  normalizeRouteMetric(metric = {}) {
+    const deviceId = metric.deviceId || metric.target_device_id || metric.targetDeviceId || metric.payload?.deviceId;
+    const device = deviceId ? this.deviceRegistry?.getById?.(deviceId) : null;
+    return {
+      ...metric,
+      deviceId,
+      managerId: metric.managerId || metric.manager_id || metric.payload?.managerId || device?.managerId || 'unknown',
+    };
+  }
 }
 
 function normalizeTelemetryEvent(event = {}) {
@@ -62,3 +82,14 @@ function normalizeTelemetryEvent(event = {}) {
 }
 
 module.exports = { TelemetryService, normalizeTelemetryEvent };
+
+function compactMetricError(err, metric = {}) {
+  return {
+    error: err.message,
+    managerId: metric.managerId,
+    nodeId: metric.nodeId,
+    deviceId: metric.deviceId,
+    attemptedRoute: metric.attemptedRoute,
+    finalRoute: metric.finalRoute,
+  };
+}
