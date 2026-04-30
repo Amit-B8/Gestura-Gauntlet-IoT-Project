@@ -11,12 +11,23 @@ class FSR:
     EVENT_HARD_PRESS = "hard_press"
     EVENT_HARD_DOUBLE_PRESS = "hard_double_press"
 
-    def __init__(self, pin_number):
+    def __init__(
+        self,
+        pin_number,
+        v_min=0.005,
+        v_max=0.4,
+        half_ratio=0.25,
+        full_ratio=0.55,
+        smoothing_samples=3,
+    ):
+        self.pin_number = pin_number
         self.adc = machine.ADC(pin_number)
 
-        # your real measured range
-        self.v_min = 0.005
-        self.v_max = 0.4
+        self.v_min = float(v_min)
+        self.v_max = float(v_max)
+        self.half_ratio = float(half_ratio)
+        self.full_ratio = float(full_ratio)
+        self.smoothing_samples = max(1, int(smoothing_samples))
 
         self.buffer = []
         self.callbacks = {}
@@ -27,6 +38,8 @@ class FSR:
         self.double_press_window_ms = 600 # ms window for double press
         
         self.current_v_smoothed = 0.0
+        self.current_raw = 0
+        self.current_voltage = 0.0
 
     def subscribe(self, event_type, callback):
         """Register a callback for a specific event."""
@@ -47,12 +60,14 @@ class FSR:
         return self.adc.read_u16()
 
     def read_voltage(self):
-        return (self.read_raw() / 65535) * 3.3
+        self.current_raw = self.read_raw()
+        self.current_voltage = (self.current_raw / 65535) * 3.3
+        return self.current_voltage
 
     # optional smoothing (important for stability)
     def _smooth(self, v):
         self.buffer.append(v)
-        if len(self.buffer) > 5:
+        if len(self.buffer) > self.smoothing_samples:
             self.buffer.pop(0)
         return sum(self.buffer) / len(self.buffer)
 
@@ -97,13 +112,41 @@ class FSR:
 
         return norm * 100
 
+    def debug_snapshot(self):
+        state = self.get_state()
+        return {
+            "pin": self.pin_number,
+            "raw": self.current_raw,
+            "voltage": self.current_voltage,
+            "smoothed_voltage": self.current_v_smoothed,
+            "pressure": self.get_pressure_percentage(),
+            "state": state,
+            "state_label": self.state_label(state),
+            "half_threshold": self.half_threshold(),
+            "full_threshold": self.full_threshold(),
+        }
+
     def get_state(self):
         """3-level button style output based on current smoothed voltage"""
         v = self.current_v_smoothed
 
-        if 0 <= v < self.v_max * .4:
+        if v < self.half_threshold():
             return self.STATE_NONE
-        elif self.v_max * .4 < v < self.v_max * .85:
+        if v < self.full_threshold():
             return self.STATE_HALF
-        else:
-            return self.STATE_FULL
+        return self.STATE_FULL
+
+    def half_threshold(self):
+        return self.v_max * self.half_ratio
+
+    def full_threshold(self):
+        return self.v_max * self.full_ratio
+
+    def state_label(self, state=None):
+        if state is None:
+            state = self.get_state()
+        if state == self.STATE_FULL:
+            return "FULL"
+        if state == self.STATE_HALF:
+            return "HALF"
+        return "NONE"
