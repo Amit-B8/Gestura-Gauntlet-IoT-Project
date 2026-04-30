@@ -268,9 +268,18 @@ const services = {
   telemetryService,
   influxTelemetrySink,
   gloveConfigService,
+  nodeSocketNamespace: io.of('/nodes'),
   systemStatus,
   authService,
 };
+
+statusSocketHub = createStatusSocketHub({
+  server,
+  authService,
+  getSnapshot: publicStatus,
+});
+services.statusSocketHub = statusSocketHub;
+app.locals.statusSocketHub = statusSocketHub;
 
 app.use('/api/managers', authService.requireDashboardAuth(), createManagersRouter(services));
 app.use('/api/devices', authService.requireDashboardAuth(), createDevicesRouter(services));
@@ -281,13 +290,6 @@ app.use('/api/route-metrics', authService.requireDashboardAuth(), createRouteMet
 app.use('/api/telemetry', authService.requireDashboardAuth(), createTelemetryRouter(services));
 app.use('/api/system', authService.requireDashboardAuth(), createSystemRouter(services));
 app.use('/api/gloves', authService.requireDashboardOrPicoToken(), createGlovesRouter(services));
-statusSocketHub = createStatusSocketHub({
-  server,
-  authService,
-  getSnapshot: publicStatus,
-});
-services.statusSocketHub = statusSocketHub;
-app.locals.statusSocketHub = statusSocketHub;
 registerNodeAgentSocket(io, services);
 gloveSocketHub = createGloveSocketHub({
   server,

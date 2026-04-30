@@ -96,6 +96,22 @@ class NodeAgent {
     this.socket.on('glove:requestSensorSnapshot', (payload = {}) => {
       this.managerAttachmentServer.requestSensorSnapshot(payload.gloveId);
     });
+    this.socket.on('glove:configUpdated', (payload = {}) => {
+      const config = payload.config;
+      if (!config) return;
+      this.cache.setConfigSnapshot(config);
+      this.managerAttachmentServer.broadcastConfigSnapshot({
+        gloveId: payload.gloveId || config.gloveId || 'primary_glove',
+        reason: payload.reason || 'central_config_updated',
+        config,
+      });
+      debug('updated cached glove config from central', {
+        gloveId: payload.gloveId || config.gloveId,
+        reason: payload.reason,
+        configHash: config.configHash,
+        endpointHash: config.endpoints?.hash,
+      });
+    });
 
     this.telemetry.start((events) => this.emitWithAck('telemetry:batch', { events }));
     this.managerAttachmentServer.start();

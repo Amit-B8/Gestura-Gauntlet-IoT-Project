@@ -23,6 +23,13 @@ class FSRInputReader:
     def bottom_pressure(self):
         return self.bottom.pressure()
 
+    def is_held(self, source):
+        if source == "top":
+            return self.top.is_held()
+        if source == "bottom":
+            return self.bottom.is_held()
+        return False
+
     def debug_snapshot(self):
         return {
             "top": self.top.debug_snapshot(),
@@ -91,6 +98,9 @@ class ChannelState:
             return self.fsr.get_pressure_percentage()
         except Exception:
             return 0.0
+
+    def is_held(self):
+        return bool(self.is_down and self.hold_active)
 
     def debug_snapshot(self):
         try:

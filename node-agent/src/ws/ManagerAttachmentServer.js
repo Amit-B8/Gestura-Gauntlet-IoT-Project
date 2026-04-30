@@ -213,11 +213,13 @@ class ManagerAttachmentServer {
 
         if (payload.type === 'mapped_action') {
           const action = payload.action || payload;
+          const actionId = payload.actionId || action.actionId;
           const result = await this.onGloveAction?.(action);
           sendGloveMessage(ws, {
             type: 'mapped_action_ack',
             gloveId: ws.gloveId,
             ts: Date.now(),
+            actionId,
             mappingId: action.mappingId,
             ok: Boolean(result?.ok),
             result,
@@ -250,6 +252,23 @@ class ManagerAttachmentServer {
       }
     }
     return requested;
+  }
+
+  broadcastConfigSnapshot({ gloveId, reason = 'central_config_updated', config }) {
+    let sent = 0;
+    for (const ws of this.gloveClients) {
+      if (!gloveId || ws.gloveId === gloveId) {
+        sendGloveMessage(ws, {
+          type: 'config_snapshot',
+          gloveId: ws.gloveId,
+          reason,
+          ts: Date.now(),
+          config,
+        });
+        sent++;
+      }
+    }
+    return sent;
   }
 
   hasValidPicoHttpToken(req) {

@@ -24,7 +24,7 @@ class RuntimeApp:
         self.glove_id = env.get("GLOVE_ID", "primary_glove")
         self.pico_api_token = env.get("PICO_API_TOKEN", "")
         self.metric_interval_sec = max(15, int(env.get("METRIC_INTERVAL_SEC", "300")))
-        self.action_send_interval_ms = int(env.get("ACTION_SEND_INTERVAL_MS", "250"))
+        self.action_send_interval_ms = int(env.get("ACTION_SEND_INTERVAL_MS", "75"))
         self.ws_heartbeat_enabled = env_bool(env.get("WS_HEARTBEAT_ENABLED", "false"))
         self.ws_heartbeat_ms = int(env.get("WS_HEARTBEAT_MS", "20000"))
         self.ws_first_heartbeat_delay_ms = int(env.get("WS_FIRST_HEARTBEAT_DELAY_MS", "30000"))
@@ -108,6 +108,7 @@ class RuntimeApp:
         self.ws_connect_failures = 0
         self.next_ws_connect_allowed_ms = 0
         self.last_action_values = {}
+        self.last_mapping_send_ms = {}
         self.action_seq = 0
         self.action_queue = []
         self.pending_action_acks = {}
@@ -148,6 +149,20 @@ class RuntimeApp:
                 print("[DEBUG][action] skipped reason=ws_soak_test")
             return False
         now = time.ticks_ms()
+        if source == "mapping":
+            mapping_id = action.get("mappingId")
+            for queued in self.action_queue:
+                queued_action = queued.get("action", {})
+                if mapping_id and queued_action.get("mappingId") == mapping_id:
+                    queued["action"] = action
+                    queued["queued_at"] = now
+                    if self.action_debug.should_print():
+                        print("[DEBUG][action] queue_replace mapping={} depth={} {}".format(
+                            mapping_id,
+                            len(self.action_queue),
+                            describe_action(action),
+                        ))
+                    return True
         if len(self.action_queue) >= self.action_queue_max:
             dropped = self.action_queue.pop(0)
             self.messages_failed += 1
@@ -381,6 +396,7 @@ class RuntimeApp:
                         for action in self.build_mapped_actions():
                             self.enqueue_action(action, "mapping")
                         last_action_ms = current_ms
+                        self.consume_queued_action(current_ms)
                     if (
                         time.ticks_diff(current_ms, last_config_refresh_ms) >= 60_000
                         and not self.runtime_config_loaded
@@ -687,13 +703,17 @@ class RuntimeApp:
 
     def build_mapped_actions(self):
         actions = []
+        now = time.ticks_ms()
         for mapping in self.mappings:
             if not mapping.get("enabled", True):
                 continue
             source = mapping.get("inputSource", "")
-            if source not in ("glove.roll", "glove.pitch"):
+            sensor_key = mapping_sensor_key(source)
+            if not sensor_key:
                 continue
-            value = self.sensor.get("roll" if source == "glove.roll" else "pitch", 0.0)
+            if not self.mapping_input_active(source):
+                continue
+            value = self.sensor.get(sensor_key, 0.0)
             mapped_value = apply_mapping_transform(value, mapping)
             key = mapping.get("id") or "{}:{}".format(mapping.get("targetDeviceId"), mapping.get("targetCapabilityId"))
             previous = self.last_action_values.get(key)
@@ -707,7 +727,12 @@ class RuntimeApp:
                         )
                     )
                 continue
+            min_interval_ms = mapping_min_interval_ms(mapping)
+            last_sent_ms = self.last_mapping_send_ms.get(key, 0)
+            if last_sent_ms and time.ticks_diff(now, last_sent_ms) < min_interval_ms:
+                continue
             self.last_action_values[key] = mapped_value
+            self.last_mapping_send_ms[key] = now
             actions.append({
                 "mappingId": mapping.get("id"),
                 "deviceId": mapping.get("targetDeviceId"),
@@ -726,6 +751,13 @@ class RuntimeApp:
                     )
                 )
         return actions
+
+    def mapping_input_active(self, source):
+        if source == "top_hold_roll":
+            return self.input_reader.is_held("top")
+        if source == "bottom_hold_roll":
+            return self.input_reader.is_held("bottom")
+        return True
 
     def build_sensor_snapshot(self):
         payload = {
@@ -1444,6 +1476,14 @@ def command_type_for_mapping(mapping):
     return "set"
 
 
+def mapping_sensor_key(source):
+    if source in ("glove.roll", "top_hold_roll", "bottom_hold_roll"):
+        return "roll"
+    if source == "glove.pitch":
+        return "pitch"
+    return None
+
+
 def apply_mapping_transform(value, mapping):
     transform = mapping.get("transform", {}) or {}
     minimum = float(transform.get("min", 0))
@@ -1452,7 +1492,8 @@ def apply_mapping_transform(value, mapping):
     offset = float(transform.get("offset", 0))
     if abs(float(value)) < deadzone:
         value = 0
-    normalized = max(-1, min(1, float(value) + offset))
+    scale = float(transform.get("scale", 1) or 1)
+    normalized = max(-1, min(1, (float(value) * scale) + offset))
     if transform.get("invert"):
         normalized = -normalized
     mapped = minimum + ((normalized + 1) / 2) * (maximum - minimum)
@@ -1466,6 +1507,17 @@ def effective_step(mapping):
     transform = mapping.get("transform", {}) or {}
     step = float(transform.get("step", 0) or 0)
     return step if step > 0 else 0.01
+
+
+def mapping_min_interval_ms(mapping):
+    transform = mapping.get("transform", {}) or {}
+    interval = int(transform.get("intervalMs", transform.get("minIntervalMs", 0)) or 0)
+    if interval > 0:
+        return interval
+    mode = str(mapping.get("mode", "")).lower()
+    if mode.startswith("continuous"):
+        return 50
+    return 0
 
 
 def calculate_orientation(accel_data):

@@ -1,6 +1,6 @@
 const express = require('express');
 
-function createGlovesRouter({ gloveConfigService, actionRouter, statusSocketHub }) {
+function createGlovesRouter({ gloveConfigService, actionRouter, statusSocketHub, nodeSocketNamespace }) {
   const router = express.Router();
 
   router.get('/', (_req, res) => {
@@ -21,14 +21,32 @@ function createGlovesRouter({ gloveConfigService, actionRouter, statusSocketHub 
 
   router.post('/:gloveId/wifi-networks', (req, res) => {
     try {
-      res.json(gloveConfigService.upsertWifiNetwork(req.params.gloveId, req.body));
+      const network = gloveConfigService.upsertWifiNetwork(req.params.gloveId, req.body);
+      broadcastConfigUpdate({
+        gloveId: req.params.gloveId,
+        reason: 'wifi_network_changed',
+        gloveConfigService,
+        nodeSocketNamespace,
+        statusSocketHub,
+      });
+      res.json(network);
     } catch (err) {
       res.status(400).json({ error: err.message });
     }
   });
 
   router.delete('/:gloveId/wifi-networks/:id', (req, res) => {
-    res.json({ ok: gloveConfigService.removeWifiNetwork(req.params.gloveId, req.params.id) });
+    const ok = gloveConfigService.removeWifiNetwork(req.params.gloveId, req.params.id);
+    if (ok) {
+      broadcastConfigUpdate({
+        gloveId: req.params.gloveId,
+        reason: 'wifi_network_removed',
+        gloveConfigService,
+        nodeSocketNamespace,
+        statusSocketHub,
+      });
+    }
+    res.json({ ok });
   });
 
   router.post('/:gloveId/route-state', (req, res) => {
@@ -113,6 +131,24 @@ function createGlovesRouter({ gloveConfigService, actionRouter, statusSocketHub 
 }
 
 module.exports = { createGlovesRouter };
+
+function broadcastConfigUpdate({ gloveId, reason, gloveConfigService, nodeSocketNamespace, statusSocketHub }) {
+  const config = gloveConfigService.getConfigSnapshot(gloveId);
+  nodeSocketNamespace?.emit?.('glove:configUpdated', {
+    type: 'config_snapshot',
+    gloveId,
+    reason,
+    ts: Date.now(),
+    config,
+  });
+  statusSocketHub?.broadcast?.('glove.config', {
+    gloveId,
+    reason,
+    configHash: config.configHash,
+    endpointHash: config.endpoints?.hash,
+    wifiNetworkCount: Array.isArray(config.wifiNetworks) ? config.wifiNetworks.length : 0,
+  });
+}
 
 function compactError(result = {}) {
   return {
