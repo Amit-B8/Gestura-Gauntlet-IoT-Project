@@ -26,7 +26,7 @@ class AttachedManager {
   }
 
   async executeAction(action) {
-    return emitWithAck(this.socket, 'manager:executeAction', { managerId: this.info.id, action });
+    return emitWithAck(this.socket, 'manager:executeAction', { managerId: this.info.id, action }, { rejectOnFalse: false });
   }
 
   async discover() {
@@ -38,7 +38,7 @@ class AttachedManager {
   }
 }
 
-function emitWithAck(socket, event, payload) {
+function emitWithAck(socket, event, payload, options = {}) {
   return new Promise((resolve, reject) => {
     socket.timeout(5000).emit(event, payload, (err, response) => {
 
@@ -46,7 +46,7 @@ function emitWithAck(socket, event, payload) {
         reject(new Error(`Attached manager did not acknowledge ${event}`));
         return;
       }
-      if (response?.ok === false) {
+      if (response?.ok === false && options.rejectOnFalse !== false) {
         reject(new Error(response.message || response.error || `${event} failed`));
         return;
       }

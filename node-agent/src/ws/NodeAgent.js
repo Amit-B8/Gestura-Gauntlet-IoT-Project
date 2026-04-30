@@ -151,7 +151,10 @@ class NodeAgent {
         return;
       }
       this.centralRegistered = true;
-      if (response?.config) this.cache.setConfigSnapshot(response.config);
+      if (response?.config) this.cache.setConfigSnapshot(this.normalizeGloveConfig(response.config, 'primary_glove'));
+      await this.hydrateConfigFromCentral('primary_glove').catch((err) => {
+        debug('central primary_glove config hydrate failed after registration', err.message);
+      });
       this.telemetry.record({
         eventType: 'node_registered',
         payload: { managerIds },
@@ -316,7 +319,47 @@ class NodeAgent {
 
     const startedAt = Date.now();
     try {
-      const result = await manager.executeAction(action);
+      const actionForManager = {
+        ...action,
+        device: device,
+        metadata: {
+          ...(device.metadata || {}),
+          ...(action.metadata || {}),
+        },
+      };
+      const result = await manager.executeAction(actionForManager);
+      if (result?.ok === false && /device not found/i.test(String(result.message || result.error || ''))) {
+        const refreshedDevices = await manager.listDevices?.().catch(() => []);
+        if (Array.isArray(refreshedDevices) && refreshedDevices.length) {
+          await this.updateManagerInventory(device.managerId, refreshedDevices);
+          const refreshedDevice = this.cache.getDeviceById?.(action.deviceId) || device;
+          const retryResult = await manager.executeAction({
+            ...action,
+            device: refreshedDevice,
+            metadata: {
+              ...(refreshedDevice.metadata || {}),
+              ...(action.metadata || {}),
+            },
+          });
+          if (retryResult?.ok !== false) {
+            return {
+              ...retryResult,
+              deviceId: retryResult?.deviceId || action.deviceId,
+              capabilityId: retryResult?.capabilityId || action.capabilityId,
+              managerId: refreshedDevice.managerId || device.managerId,
+              targetUrl,
+            };
+          }
+          return {
+            ...retryResult,
+            deviceId: retryResult?.deviceId || action.deviceId,
+            capabilityId: retryResult?.capabilityId || action.capabilityId,
+            managerId: refreshedDevice.managerId || device.managerId,
+            targetUrl,
+            upstreamError: retryResult?.message || retryResult?.error,
+          };
+        }
+      }
       this.telemetry.record({
         eventType: 'route_attempt',
         managerId: device.managerId,
@@ -385,9 +428,39 @@ class NodeAgent {
     if (!response.ok) {
       throw new Error(`central config hydrate failed with ${response.status}`);
     }
-    const config = await response.json();
+    const config = this.normalizeGloveConfig(await response.json(), gloveId);
+    if (!Array.isArray(config.wifiNetworks) || config.wifiNetworks.length === 0) {
+      const wifiNetworks = await this.fetchWifiNetworksFromCentral(gloveId).catch((err) => {
+        debug('central wifi network hydrate failed', err.message);
+        return null;
+      });
+      if (Array.isArray(wifiNetworks) && wifiNetworks.length > 0) {
+        config.wifiNetworks = wifiNetworks;
+      }
+    }
     this.cache.setConfigSnapshot(config);
     return config;
+  }
+
+  async fetchWifiNetworksFromCentral(gloveId = 'primary_glove') {
+    if (!this.centralApiUrl) return null;
+    const url = `${String(this.centralApiUrl).replace(/\/$/, '')}/api/gloves/${encodeURIComponent(gloveId)}/wifi-networks`;
+    const response = await fetch(url, {
+      headers: this.centralPicoToken ? { 'x-pico-token': this.centralPicoToken } : {},
+    });
+    if (!response.ok) {
+      throw new Error(`central wifi hydrate failed with ${response.status}`);
+    }
+    return response.json();
+  }
+
+  normalizeGloveConfig(config, gloveId = 'primary_glove') {
+    if (!config || typeof config !== 'object') return config;
+    return {
+      ...config,
+      gloveId: config.gloveId === 'default' ? gloveId : (config.gloveId || gloveId),
+      routeStates: deriveRouteStates(config.routeStates, config.managers),
+    };
   }
 
   async forwardGloveActionToCentral(action, { reason, gloveId = 'primary_glove', actionId, managerId } = {}) {
@@ -607,6 +680,27 @@ function firstInterfaceUrl(managerInfo = {}) {
     (left, right) => (left.priority ?? 100) - (right.priority ?? 100)
   )[0];
   return first?.actionHttpUrl || first?.url || null;
+}
+
+function deriveRouteStates(routeStates = [], managers = []) {
+  const states = new Map();
+  for (const state of routeStates || []) {
+    if (state?.managerId) states.set(state.managerId, state);
+  }
+  for (const manager of managers || []) {
+    if (!manager?.id || states.has(manager.id)) continue;
+    const nodeId = manager.nodeId || manager.metadata?.nodeId;
+    if (!nodeId) continue;
+    states.set(manager.id, {
+      type: 'route_state',
+      managerId: manager.id,
+      nodeId,
+      route: 'edge',
+      online: manager.online !== false,
+      updatedAt: manager.metadata?.lastHeartbeatAt || new Date().toISOString(),
+    });
+  }
+  return Array.from(states.values());
 }
 
 function stripEdgeOnlyActionFields(action = {}) {
