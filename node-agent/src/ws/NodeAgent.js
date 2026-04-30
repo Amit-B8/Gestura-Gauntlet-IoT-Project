@@ -50,7 +50,7 @@ class NodeAgent {
       onHealth: (managerId, health) => this.updateManagerHealth(managerId, health),
       onGloveAction: (action) => this.executeGloveAction(action),
       onSensorSnapshot: (snapshot) => this.forwardSensorSnapshot(snapshot),
-      getConfigSnapshot: () => this.cache.getConfigSnapshot(),
+      getConfigSnapshot: (gloveId) => this.cache.getConfigSnapshot(gloveId),
     });
   }
 

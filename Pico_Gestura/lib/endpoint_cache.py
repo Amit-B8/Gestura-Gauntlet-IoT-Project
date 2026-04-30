@@ -59,6 +59,7 @@ class EndpointCache:
             for iface in node.get("interfaces", []):
                 item = dict(iface)
                 item["nodeId"] = node.get("nodeId", "")
+                item["nodeName"] = node.get("name") or node.get("nodeId", "")
                 item["_priority"] = int(item.get("priority", 100)) + node_bias
                 interfaces.append(item)
         return sorted(interfaces, key=lambda item: (transport_rank(item), item.get("_priority", 100)))

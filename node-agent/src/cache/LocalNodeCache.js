@@ -3,17 +3,27 @@ const { clone } = require('../../../gestura-backend/runtime/utils');
 class LocalNodeCache {
   constructor() {
     this.configSnapshot = null;
+    this.configSnapshots = new Map();
     this.deviceInventory = new Map();
     this.deviceStates = new Map();
     this.pendingTelemetry = [];
   }
 
   setConfigSnapshot(snapshot) {
-    this.configSnapshot = clone(snapshot);
+    const next = clone(snapshot);
+    this.configSnapshot = next;
+    const gloveId = next?.gloveId || 'primary_glove';
+    this.configSnapshots.set(gloveId, next);
     this.hydrateInventoryFromSnapshot(snapshot);
   }
 
-  getConfigSnapshot() {
+  getConfigSnapshot(gloveId) {
+    if (gloveId && this.configSnapshots.has(gloveId)) {
+      return clone(this.configSnapshots.get(gloveId));
+    }
+    if (gloveId && gloveId !== 'primary_glove' && this.configSnapshots.has('primary_glove')) {
+      return clone(this.configSnapshots.get('primary_glove'));
+    }
     return clone(this.configSnapshot);
   }
 

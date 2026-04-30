@@ -48,7 +48,7 @@ function registerNodeAgentSocket(io, services) {
         interfaces: normalizeInterfaces(payload.interfaces || []),
         metadata: payload.metadata || {},
       });
-      ack?.({ ok: true, node, config: services.gloveConfigService.getConfigSnapshot('default') });
+      ack?.({ ok: true, node, config: services.gloveConfigService.getConfigSnapshot('primary_glove') });
       io.emit('nodes', services.nodeRegistry.getAll());
       services.statusSocketHub?.broadcast('status.patch', {
         nodes: services.nodeRegistry.getAll(),

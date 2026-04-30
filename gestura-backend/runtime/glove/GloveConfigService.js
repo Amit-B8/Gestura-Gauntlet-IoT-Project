@@ -41,7 +41,7 @@ class GloveConfigService {
       managers,
       endpoints: this.getEndpointMetadata(),
       wifiNetworks: this.listWifiNetworks(gloveId),
-      routeStates: this.getRouteStates(),
+      routeStates: this.getRouteStates(managers),
       policy,
     };
     snapshot.configVersion = 1;
@@ -71,12 +71,29 @@ class GloveConfigService {
     }
   }
 
-  getRouteStates() {
-    return Array.from(this.routeStates.values()).map(clone);
+  getRouteStates(managers = []) {
+    const states = new Map();
+    for (const state of this.routeStates.values()) {
+      if (state.managerId) states.set(state.managerId, clone(state));
+    }
+    for (const manager of managers || []) {
+      if (!manager?.id || states.has(manager.id)) continue;
+      const nodeId = manager.nodeId || manager.metadata?.nodeId;
+      if (!nodeId) continue;
+      states.set(manager.id, {
+        type: 'route_state',
+        managerId: manager.id,
+        nodeId,
+        route: 'edge',
+        online: manager.online !== false,
+        updatedAt: manager.metadata?.lastHeartbeatAt || new Date().toISOString(),
+      });
+    }
+    return Array.from(states.values()).map(clone);
   }
 
   getEndpointMetadata() {
-    const nodes = this.nodeRegistry?.getAll?.() || [];
+    const nodes = orderEndpointNodes(this.nodeRegistry?.getAll?.() || []);
     const endpoints = {
       version: 1,
       generatedAt: new Date().toISOString(),
@@ -159,6 +176,27 @@ class GloveConfigService {
       networks: Array.from(this.wifiNetworks.values()),
     });
   }
+}
+
+function orderEndpointNodes(nodes = []) {
+  return [...nodes].sort((left, right) => endpointNodeRank(left) - endpointNodeRank(right));
+}
+
+function endpointNodeRank(node = {}) {
+  const onlinePenalty = node.online === false ? 1000 : 0;
+  const interfaces = normalizeInterfaces(node.interfaces || []);
+  if (!interfaces.length) return onlinePenalty + 500;
+  return onlinePenalty + Math.min(...interfaces.map(endpointInterfaceRank));
+}
+
+function endpointInterfaceRank(item = {}) {
+  const url = String(item.gloveWsUrl || item.configHttpUrl || item.url || '');
+  if (/\b(?:10|172\.(?:1[6-9]|2\d|3[0-1])|192\.168)\./.test(url)) return 0;
+  if (url.includes('localhost') || url.includes('127.0.0.1')) return 20;
+  if (/^wss:\/\//.test(url)) return 30;
+  if (/^https:\/\//.test(url)) return 40;
+  if (/^[a-z]+:\/\/[a-z0-9_-]+(?::|\/|$)/i.test(url)) return 100;
+  return 50;
 }
 
 function provenanceForDevice(device, managerById) {

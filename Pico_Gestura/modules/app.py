@@ -818,12 +818,12 @@ class RuntimeApp:
                 if self.wifi_debug.enabled():
                     print("[DEBUG][wifi] config attempt source={} url={}".format(source, redact_url(url)))
                 config = self.fetch_json(url)
+                self.active_interface = interface
                 endpoints = self.update_runtime_config(config, source)
                 if endpoints:
                     cache.update_if_changed(endpoints, ca_der_path=self.ca_der_path)
                 if interface:
                     cache.set_last_good(interface.get("nodeId", ""))
-                    self.active_interface = interface
                 if self.wifi_debug.enabled():
                     print("[DEBUG][wifi] config ok source={} endpoint={}".format(
                         source,
@@ -831,7 +831,6 @@ class RuntimeApp:
                     ))
                 if interface:
                     return interface_endpoint(interface)
-                self.active_interface = None
                 return self.glove_ws_url
             except Exception as exc:
                 self.status.update(last_error=str(exc))
@@ -881,7 +880,7 @@ class RuntimeApp:
         self.runtime_config_loaded = True
         if isinstance(endpoints, dict):
             self.endpoint_hash = str(endpoints.get("hash") or self.endpoint_hash or "")
-        node_name = first_node_name(endpoints)
+        node_name = active_node_name(endpoints, self.active_interface)
         if self.ws_debug.enabled():
             print(
                 "[DEBUG][ws] config source={} managers={} devices={} mappings={} endpoints={} hash_changed={} config_hash={} config_version={} endpoint_hash={}".format(
@@ -1456,7 +1455,18 @@ def is_allowed_endpoint(interface):
     return kind == "lan" and (url.startswith("ws://") or url.startswith("http://"))
 
 
-def first_node_name(endpoints):
+def active_node_name(endpoints, active_interface=None):
+    if active_interface:
+        node_id = active_interface.get("nodeId", "")
+        node_name = active_interface.get("nodeName", "")
+        if node_name:
+            return node_name
+        try:
+            for node in endpoints.get("nodes", []):
+                if node.get("nodeId") == node_id:
+                    return node.get("name") or node.get("nodeId")
+        except Exception:
+            pass
     try:
         nodes = endpoints.get("nodes", [])
         for node in nodes:
