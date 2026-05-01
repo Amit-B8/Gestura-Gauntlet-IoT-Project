@@ -79,6 +79,22 @@ export default function SmartHomeDemoPage() {
   }, [])
 
   useEffect(() => {
+    const notifySelection = async () => {
+      const deviceId = state.selectedDevice ? (API_CONTROL_MAP[`${state.selectedDevice}On` as ApiControlKey]?.deviceId || state.selectedDevice) : null;
+      try {
+        await fetch('/api/selection', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ deviceId }),
+        });
+      } catch (err) {
+        console.error('Failed to notify selection:', err);
+      }
+    };
+    notifySelection();
+  }, [state.selectedDevice]);
+
+  useEffect(() => {
     let isCancelled = false
 
     const loadInitialState = async () => {
