@@ -24,7 +24,7 @@ class RuntimeApp:
         self.glove_id = env.get("GLOVE_ID", "primary_glove")
         self.pico_api_token = env.get("PICO_API_TOKEN", "")
         self.metric_interval_sec = max(15, int(env.get("METRIC_INTERVAL_SEC", "300")))
-        self.action_send_interval_ms = int(env.get("ACTION_SEND_INTERVAL_MS", "75"))
+        self.action_send_interval_ms = int(env.get("ACTION_SEND_INTERVAL_MS", "30"))
         self.ws_heartbeat_enabled = env_bool(env.get("WS_HEARTBEAT_ENABLED", "false"))
         self.ws_heartbeat_ms = int(env.get("WS_HEARTBEAT_MS", "20000"))
         self.ws_first_heartbeat_delay_ms = int(env.get("WS_FIRST_HEARTBEAT_DELAY_MS", "30000"))
@@ -50,6 +50,13 @@ class RuntimeApp:
         self.action_transport = str(env.get("PICO_ACTION_TRANSPORT", "auto") or "auto").lower()
         self.http_action_fallback = env_bool(env.get("PICO_HTTP_ACTION_FALLBACK", "true"))
         self.http_action_timeout = float(env.get("PICO_HTTP_ACTION_TIMEOUT_SEC", "1.0"))
+        self.http_action_async = env_bool(env.get("PICO_HTTP_ACTION_ASYNC", "true"))
+        self.continuous_action_min_interval_ms = int(env.get("CONTINUOUS_ACTION_MIN_INTERVAL_MS", "100"))
+        self.continuous_action_min_delta = float(env.get("CONTINUOUS_ACTION_MIN_DELTA", "3"))
+        self.continuous_roll_requires_fsr = env_bool(env.get("CONTINUOUS_ROLL_REQUIRES_FSR", "true"))
+        self.continuous_roll_fsr_source = str(env.get("CONTINUOUS_ROLL_FSR_SOURCE", "bottom") or "bottom").lower()
+        self.continuous_roll_runs_in_passive = env_bool(env.get("CONTINUOUS_ROLL_RUNS_IN_PASSIVE", "true"))
+        self.roll_axis = str(env.get("ROLL_AXIS", "yz") or "yz").lower()
         self.timing_log_interval_ms = int(env.get("TIMING_LOG_INTERVAL_MS", "5000"))
         self.endpoint_cache_path = env.get("ENDPOINT_CACHE_PATH", "endpoint_cache.json")
         self.ca_der_path = env.get("CA_DER_PATH", "")
@@ -70,6 +77,7 @@ class RuntimeApp:
         self.imu_debug = DebugPrinter(env.get("DEBUG_CONFIG"), "imu")
         self.wifi_debug = DebugPrinter(debug_config, "wifi")
         self.action_debug = DebugPrinter(debug_config, "action")
+        self.roll_debug = DebugPrinter(debug_config, "roll")
         self.ws_debug = DebugPrinter(debug_config, "ws")
         self.transport = None
         self.active_endpoint = None
@@ -332,6 +340,9 @@ class RuntimeApp:
             return False
         started = time.ticks_ms()
         try:
+            action_url = self.action_url_for_endpoint(self.active_endpoint, action)
+            if self.http_action_async:
+                action_url = append_query_param(action_url, "async", "1")
             payload = {
                 "type": "mapped_action",
                 "gloveId": self.glove_id,
@@ -340,7 +351,7 @@ class RuntimeApp:
             }
             payload.update(action)
             result = post_json(
-                self.with_pico_auth(self.action_url_for_endpoint(self.active_endpoint, action)),
+                self.with_pico_auth(action_url),
                 payload,
                 ca_der_path=self.ca_der_path,
                 timeout=self.http_action_timeout,
@@ -388,11 +399,7 @@ class RuntimeApp:
                     current_ms = time.ticks_ms()
                     self.set_connection(True, "HTTP")
                     self.consume_queued_action(current_ms)
-                    if (
-                        not self.ws_soak_test
-                        and self.state.mode == "ACTIVE"
-                        and time.ticks_diff(current_ms, last_action_ms) >= self.action_send_interval_ms
-                    ):
+                    if self.should_process_mapped_actions(current_ms, last_action_ms):
                         for action in self.build_mapped_actions():
                             self.enqueue_action(action, "mapping")
                         last_action_ms = current_ms
@@ -411,11 +418,7 @@ class RuntimeApp:
                 if not self.socket_ready():
                     if not self.connect_ws("receive_channel"):
                         current_ms = time.ticks_ms()
-                        if (
-                            not self.ws_soak_test
-                            and self.state.mode == "ACTIVE"
-                            and time.ticks_diff(current_ms, last_action_ms) >= self.action_send_interval_ms
-                        ):
+                        if self.should_process_mapped_actions(current_ms, last_action_ms):
                             for action in self.build_mapped_actions():
                                 self.enqueue_action(action, "mapping")
                             last_action_ms = current_ms
@@ -480,12 +483,7 @@ class RuntimeApp:
                     if self.check_action_ack_timeouts(current_ms):
                         raise RuntimeError("Action ACK timeout")
 
-                    if (
-                        not self.ws_soak_test
-                        and
-                        self.state.mode == "ACTIVE"
-                        and time.ticks_diff(current_ms, last_action_ms) >= self.action_send_interval_ms
-                    ):
+                    if self.should_process_mapped_actions(current_ms, last_action_ms):
                         for action in self.build_mapped_actions():
                             if self.action_debug.should_print():
                                 print("[DEBUG][action] mapped from imu {}".format(safe_json(action)))
@@ -534,7 +532,7 @@ class RuntimeApp:
             try:
                 accel_data = self.mpu.get_accel()
                 gyro_data = self.mpu.get_gyro()
-                orientation = calculate_orientation(accel_data)
+                orientation = calculate_orientation(accel_data, self.roll_axis)
                 self.mpu.runtime_re_zero(gyro_data["x"], gyro_data["y"], gyro_data["z"], alpha=0.999)
                 self.sensor.update({
                     "accel_x": accel_data["x"],
@@ -559,6 +557,20 @@ class RuntimeApp:
                             gyro_data["z"],
                             orientation["roll_deg"],
                             orientation["pitch_deg"],
+                        )
+                    )
+                if self.roll_debug.should_print():
+                    print(
+                        "[DEBUG][roll] sensor axis={} selected={:.1f}/{:.3f} yz={:.1f} xz={:.1f} xy={:.1f} fsr_bottom={} pressure={:.1f} mode={}".format(
+                            self.roll_axis,
+                            orientation["roll_deg"],
+                            orientation["roll"],
+                            orientation["roll_yz_deg"],
+                            orientation["roll_xz_deg"],
+                            orientation["roll_xy_deg"],
+                            self.input_reader.is_pressed("bottom"),
+                            self.input_reader.bottom_pressure(),
+                            self.state.mode,
                         )
                     )
             except Exception as exc:
@@ -701,6 +713,30 @@ class RuntimeApp:
             if isinstance(config, dict):
                 self.update_runtime_config(config, "websocket")
 
+    def should_process_mapped_actions(self, current_ms, last_action_ms):
+        if self.ws_soak_test:
+            return False
+        if time.ticks_diff(current_ms, last_action_ms) < self.action_send_interval_ms:
+            return False
+        if self.state.mode == "ACTIVE":
+            return True
+        return self.continuous_roll_runs_in_passive and self.has_active_roll_gesture()
+
+    def has_active_roll_gesture(self):
+        if not self.current_screen_is_device_detail():
+            return False
+        if not self.input_reader.is_pressed(self.continuous_roll_fsr_source):
+            return False
+        for mapping in self.mappings:
+            if (
+                mapping.get("enabled", True)
+                and mapping.get("inputSource", "") == "glove.roll"
+                and is_continuous_mapping(mapping)
+                and self.mapping_matches_selected_action(mapping)
+            ):
+                return True
+        return False
+
     def build_mapped_actions(self):
         actions = []
         now = time.ticks_ms()
@@ -711,23 +747,60 @@ class RuntimeApp:
             sensor_key = mapping_sensor_key(source)
             if not sensor_key:
                 continue
-            if not self.mapping_input_active(source):
+            key = mapping.get("id") or "{}:{}".format(mapping.get("targetDeviceId"), mapping.get("targetCapabilityId"))
+            if source == "glove.roll" and is_continuous_mapping(mapping) and not self.mapping_matches_selected_action(mapping):
+                if self.roll_debug.should_print():
+                    print(
+                        "[DEBUG][roll] mapping={} selected=false target={}/{} selected={}/{}".format(
+                            key,
+                            mapping.get("targetDeviceId"),
+                            mapping.get("targetCapabilityId"),
+                            self.selected_device_id(),
+                            self.selected_capability_id(),
+                        )
+                    )
                 continue
             value = self.sensor.get(sensor_key, 0.0)
+            if not self.mapping_input_active(source, mapping):
+                if source == "glove.roll" and self.roll_debug.should_print():
+                    print(
+                        "[DEBUG][roll] mapping={} active=false fsr_source={} fsr_pressed={} roll={:.3f} roll_deg={:.1f}".format(
+                            key,
+                            self.continuous_roll_fsr_source,
+                            self.input_reader.is_pressed(self.continuous_roll_fsr_source),
+                            value,
+                            self.sensor.get("roll_deg", 0.0),
+                        )
+                    )
+                self.last_action_values.pop(key, None)
+                self.last_mapping_send_ms.pop(key, None)
+                continue
             mapped_value = apply_mapping_transform(value, mapping)
-            key = mapping.get("id") or "{}:{}".format(mapping.get("targetDeviceId"), mapping.get("targetCapabilityId"))
+            if source == "glove.roll" and self.roll_debug.should_print():
+                print(
+                    "[DEBUG][roll] mapping={} active=true fsr_source={} fsr_pressed={} roll={:.3f} roll_deg={:.1f} percent={:.3f} mapped={}".format(
+                        key,
+                        self.continuous_roll_fsr_source,
+                        self.input_reader.is_pressed(self.continuous_roll_fsr_source),
+                        value,
+                        self.sensor.get("roll_deg", 0.0),
+                        axis_to_percent(value, mapping),
+                        mapped_value,
+                    )
+                )
             previous = self.last_action_values.get(key)
-            if previous is not None and abs(float(mapped_value) - float(previous)) < effective_step(mapping):
+            min_delta = self.mapping_effective_delta(mapping)
+            if previous is not None and abs(float(mapped_value) - float(previous)) < min_delta:
                 if self.action_debug.enabled():
                     print(
                         "[DEBUG][action] skip mapping={} delta={:.4f} step={:.4f}".format(
                             key,
                             abs(float(mapped_value) - float(previous)),
-                            effective_step(mapping),
+                            min_delta,
                         )
                     )
                 continue
-            min_interval_ms = mapping_min_interval_ms(mapping)
+            min_interval_ms = self.mapping_min_interval_ms(mapping)
             last_sent_ms = self.last_mapping_send_ms.get(key, 0)
             if last_sent_ms and time.ticks_diff(now, last_sent_ms) < min_interval_ms:
                 continue
@@ -741,6 +814,11 @@ class RuntimeApp:
                 "value": mapped_value,
                 "inputSource": source,
             })
+            self.apply_pending_action_value(
+                mapping.get("targetDeviceId"),
+                mapping.get("targetCapabilityId"),
+                mapped_value,
+            )
             if self.action_debug.enabled():
                 print(
                     "[DEBUG][action] built mapping={} source={} value={} mapped={}".format(
@@ -752,12 +830,54 @@ class RuntimeApp:
                 )
         return actions
 
-    def mapping_input_active(self, source):
+    def mapping_input_active(self, source, mapping=None):
         if source == "top_hold_roll":
-            return self.input_reader.is_held("top")
+            return self.input_reader.is_pressed("top")
         if source == "bottom_hold_roll":
-            return self.input_reader.is_held("bottom")
+            return self.input_reader.is_pressed("bottom")
+        if source == "glove.roll" and self.continuous_roll_requires_fsr and is_continuous_mapping(mapping):
+            return self.input_reader.is_pressed(self.continuous_roll_fsr_source)
         return True
+
+    def selected_device_id(self):
+        screen = self.state.current_screen
+        if screen and getattr(screen, "kind", "") == "device":
+            return getattr(screen.device, "id", None)
+        return None
+
+    def selected_capability_id(self):
+        screen = self.state.current_screen
+        if screen and getattr(screen, "kind", "") == "device":
+            action = screen.selected_action()
+            return getattr(action, "id", None)
+        return None
+
+    def mapping_matches_selected_action(self, mapping):
+        if not self.current_screen_is_device_detail():
+            return False
+        selected_device = self.selected_device_id()
+        selected_capability = self.selected_capability_id()
+        if not selected_device or not selected_capability:
+            return False
+        return (
+            mapping.get("targetDeviceId") == selected_device
+            and mapping.get("targetCapabilityId") == selected_capability
+        )
+
+    def current_screen_is_device_detail(self):
+        return bool(self.state.current_screen and getattr(self.state.current_screen, "kind", "") == "device")
+
+    def mapping_effective_delta(self, mapping):
+        delta = effective_step(mapping)
+        if is_continuous_mapping(mapping):
+            delta = max(delta, self.continuous_action_min_delta)
+        return delta
+
+    def mapping_min_interval_ms(self, mapping):
+        interval = mapping_min_interval_ms(mapping)
+        if is_continuous_mapping(mapping):
+            interval = max(interval, self.continuous_action_min_interval_ms)
+        return interval
 
     def build_sensor_snapshot(self):
         payload = {
@@ -931,6 +1051,21 @@ class RuntimeApp:
                     capability_id,
                     applied_value,
                 ))
+        return changed
+
+    def apply_pending_action_value(self, device_id, capability_id, value):
+        if not device_id or not capability_id:
+            return False
+        changed = False
+        screen = self.state.current_screen
+        if screen and getattr(screen, "kind", "") == "device" and getattr(screen.device, "id", "") == device_id:
+            changed = screen.set_value(capability_id, value)
+        if changed:
+            if capability_id == "power":
+                self.state.message = "Power {}".format("ON" if bool(value) else "OFF")
+            else:
+                self.state.message = "{} {}".format(capability_id, value)
+            self.state.mark_dirty()
         return changed
 
     def set_connection(self, connected, message):
@@ -1436,6 +1571,11 @@ def interface_endpoint(interface):
     return interface.get("gloveWsUrl") or interface.get("url") or interface.get("configHttpUrl") or ""
 
 
+def append_query_param(url, key, value):
+    separator = "&" if "?" in str(url or "") else "?"
+    return "{}{}{}={}".format(url, separator, key, value)
+
+
 def fill_endpoint_template(template, glove_id, device_id="", capability_id=""):
     return (
         str(template or "")
@@ -1486,6 +1626,11 @@ def command_type_for_mapping(mapping):
     return "set"
 
 
+def is_continuous_mapping(mapping):
+    mode = str((mapping or {}).get("mode", "")).lower()
+    return mode.startswith("continuous")
+
+
 def mapping_sensor_key(source):
     if source in ("glove.roll", "top_hold_roll", "bottom_hold_roll"):
         return "roll"
@@ -1495,22 +1640,40 @@ def mapping_sensor_key(source):
 
 
 def apply_mapping_transform(value, mapping):
+    percent = axis_to_percent(value, mapping)
     transform = mapping.get("transform", {}) or {}
     minimum = float(transform.get("min", 0))
     maximum = float(transform.get("max", 100))
-    deadzone = abs(float(transform.get("deadzone", 0)))
-    offset = float(transform.get("offset", 0))
-    if abs(float(value)) < deadzone:
-        value = 0
-    scale = float(transform.get("scale", 1) or 1)
-    normalized = max(-1, min(1, (float(value) * scale) + offset))
-    if transform.get("invert"):
-        normalized = -normalized
-    mapped = minimum + ((normalized + 1) / 2) * (maximum - minimum)
+    mapped = minimum + ((percent / 100.0) * (maximum - minimum))
     step = float(transform.get("step", 0) or 0)
     if step > 0:
         mapped = round(mapped / step) * step
     return max(minimum, min(maximum, mapped))
+
+
+def axis_to_percent(value, mapping):
+    transform = (mapping or {}).get("transform", {}) or {}
+    low = float(transform.get("axisMin", transform.get("inputMin", -1)))
+    high = float(transform.get("axisMax", transform.get("inputMax", 1)))
+    if low == high:
+        low = -1.0
+        high = 1.0
+
+    axis = float(value)
+    deadzone = abs(float(transform.get("deadzone", 0)))
+    offset = float(transform.get("offset", 0))
+    scale = float(transform.get("scale", 1) or 1)
+    if abs(axis) < deadzone:
+        axis = 0.0
+    axis = (axis * scale) + offset
+    if transform.get("invert"):
+        axis = -axis
+
+    min_axis = min(low, high)
+    max_axis = max(low, high)
+    axis = max(min_axis, min(max_axis, axis))
+    percent = ((axis - low) / (high - low)) * 100.0
+    return max(0.0, min(100.0, percent))
 
 
 def effective_step(mapping):
@@ -1526,20 +1689,31 @@ def mapping_min_interval_ms(mapping):
         return interval
     mode = str(mapping.get("mode", "")).lower()
     if mode.startswith("continuous"):
-        return 50
+        return 25
     return 0
 
 
-def calculate_orientation(accel_data):
+def calculate_orientation(accel_data, roll_axis="yz"):
     ax = float(accel_data.get("x", 0.0))
     ay = float(accel_data.get("y", 0.0))
     az = float(accel_data.get("z", 0.0))
-    roll_deg = math.atan2(ay, az) * 57.2957795
+    roll_yz_deg = math.atan2(ay, az) * 57.2957795
+    roll_xz_deg = math.atan2(ax, az) * 57.2957795
+    roll_xy_deg = math.atan2(ax, ay) * 57.2957795
+    if roll_axis == "xz":
+        roll_deg = roll_xz_deg
+    elif roll_axis == "xy":
+        roll_deg = roll_xy_deg
+    else:
+        roll_deg = roll_yz_deg
     pitch_deg = math.atan2(-ax, math.sqrt((ay * ay) + (az * az))) * 57.2957795
     return {
         "roll": clamp(roll_deg / 90.0, -1.0, 1.0),
         "pitch": clamp(pitch_deg / 90.0, -1.0, 1.0),
         "roll_deg": roll_deg,
+        "roll_yz_deg": roll_yz_deg,
+        "roll_xz_deg": roll_xz_deg,
+        "roll_xy_deg": roll_xy_deg,
         "pitch_deg": pitch_deg,
     }
 
