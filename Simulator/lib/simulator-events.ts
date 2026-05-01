@@ -1,4 +1,5 @@
 import { EventEmitter } from "events"
+import type { DeviceStateSnapshot } from "./simulator-api"
 
 declare global {
   // eslint-disable-next-line no-var
@@ -12,10 +13,7 @@ if (!global.__gesturaSimulatorEvents) {
   global.__gesturaSimulatorEvents = eventBus
 }
 
-export type DeviceStateChangeEvent = {
-  deviceId: string
-  state: unknown
-}
+export type DeviceStateChangeEvent = DeviceStateSnapshot
 
 export function publishDeviceStateChange(event: DeviceStateChangeEvent) {
   eventBus.emit("device-state-change", event)
