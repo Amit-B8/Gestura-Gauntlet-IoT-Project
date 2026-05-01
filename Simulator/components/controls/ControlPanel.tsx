@@ -16,7 +16,7 @@ export function ControlPanel({ state, onChange }: Props) {
       <div className="space-y-4">
         <div className="rounded-xl border border-[#c97855]/30 bg-gradient-to-br from-[#303645] to-[#222735] p-4">
           <p className="text-[10px] uppercase tracking-[0.26em] text-[#e6ad74]">Gestura Simulator</p>
-          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-[#f2e8d8]">Engineer Room</h1>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-[#f2e8d8]">Living Room</h1>
           <p className="mt-2 text-xs leading-relaxed text-[#c8bfaf]">
             Live smart-room controls mapped to the 3D device model.
           </p>
