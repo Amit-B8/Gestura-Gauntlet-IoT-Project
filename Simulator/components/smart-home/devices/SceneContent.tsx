@@ -1,73 +1,50 @@
-import { memo, useMemo } from "react"
-import { OrbitControls } from "@react-three/drei"
+import { memo, useEffect } from "react"
+import { useThree } from "@react-three/fiber"
+import { ContactShadows, OrbitControls } from "@react-three/drei"
 import { Room } from "../Room"
-import { CeilingLight } from "./CeilingLight"
-import { DeskLamp } from "./DeskLamp"
 import { AccentLight } from "./AccentLight"
-import { SmartSwitch } from "./SmartSwitch"
-import { SmartPlug } from "./SmartPlug"
-import { Fan } from "./Fan"
 import { TV } from "./TV"
 import { Thermostat } from "./Thermostat"
 import type { SmartHomeSceneProps } from "../types"
 
 export const SceneContent = memo(function SceneContent(props: SmartHomeSceneProps) {
+  const { camera } = useThree()
   const {
-    ceilingLightOn,
-    ceilingLightBrightness,
-    deskLampOn,
-    deskLampBrightness,
+    tableLampOn,
+    tableLampBrightness,
+    tableLampColor,
+    cornerLedColor,
+    cornerLedIntensity,
     accentLightColor,
     accentLightIntensity,
-    switchOn,
-    plugOn,
-    fanOn,
-    fanSpeed,
     tvOn,
-    tvBrightness,
     thermostatOn,
     thermostatTemp,
     thermostatMode,
-    passiveMode,
-    productivityLevel,
     selectedDevice,
   } = props
 
-  const ambientColor = useMemo(() => {
-    if (!passiveMode) return "#222244"
-    switch (productivityLevel) {
-      case "high":
-        return "#22ff88"
-      case "medium":
-        return "#ffcc22"
-      case "low":
-        return "#ff4444"
-      default:
-        return "#222244"
-    }
-  }, [passiveMode, productivityLevel])
-
-  const ambientIntensity = passiveMode ? 0.3 : 0.1
+  useEffect(() => {
+    camera.position.set(2.65, 1.38, 4.65)
+    camera.lookAt(-2.65, 1.62, -4.72)
+    camera.updateProjectionMatrix()
+  }, [camera])
 
   return (
     <>
-      <hemisphereLight args={["#f7fbff", "#404052", 0.65]} />
-      <ambientLight intensity={0.35} />
-      <directionalLight position={[5, 8, 5]} intensity={0.65} castShadow />
-      <pointLight position={[0, 3.2, 3.5]} intensity={0.45} distance={9} color="#d9e8ff" />
+      <color attach="background" args={["#171925"]} />
+      <fog attach="fog" args={["#171925", 15, 30]} />
+      <hemisphereLight args={["#ffe7c8", "#37314d", 1.05]} />
+      <ambientLight intensity={0.42} />
+      <directionalLight position={[4, 6.4, 4.5]} intensity={0.45} castShadow shadow-mapSize={[1536, 1536]} />
 
-      <Room ambientColor={ambientColor} ambientIntensity={ambientIntensity} />
-
-      <CeilingLight
-        isOn={ceilingLightOn}
-        brightness={ceilingLightBrightness}
-        isSelected={selectedDevice === "ceilingLight"}
-      />
-
-      <DeskLamp
-        isOn={deskLampOn}
-        brightness={deskLampBrightness}
-        isSelected={selectedDevice === "deskLamp"}
+      <Room
+        cornerLedColor={cornerLedColor}
+        cornerLedIntensity={cornerLedIntensity}
+        tableLampOn={tableLampOn}
+        tableLampBrightness={tableLampBrightness}
+        tableLampColor={tableLampColor}
+        tableLampSelected={selectedDevice === "tableLamp"}
       />
 
       <AccentLight
@@ -76,13 +53,7 @@ export const SceneContent = memo(function SceneContent(props: SmartHomeSceneProp
         isSelected={selectedDevice === "accentLight"}
       />
 
-      <SmartSwitch isOn={switchOn} isSelected={selectedDevice === "switch"} />
-
-      <SmartPlug isOn={plugOn} isSelected={selectedDevice === "plug"} />
-
-      <Fan isOn={fanOn} speed={fanSpeed} isSelected={selectedDevice === "fan"} />
-
-      <TV isOn={tvOn} brightness={tvBrightness} isSelected={selectedDevice === "tv"} />
+      <TV isOn={tvOn} isSelected={selectedDevice === "tv"} />
 
       <Thermostat
         isOn={thermostatOn}
@@ -91,15 +62,24 @@ export const SceneContent = memo(function SceneContent(props: SmartHomeSceneProp
         isSelected={selectedDevice === "thermostat"}
       />
 
+      <ContactShadows
+        position={[0, 0.025, 0]}
+        opacity={0.36}
+        scale={10}
+        blur={2.4}
+        far={5}
+        color="#11131f"
+      />
+
       <OrbitControls
         enablePan={true}
         enableZoom={true}
         enableRotate={true}
-        minDistance={3}
-        maxDistance={15}
-        minPolarAngle={0.2}
+        minDistance={2.4}
+        maxDistance={13}
+        minPolarAngle={0.35}
         maxPolarAngle={Math.PI / 2 - 0.1}
-        target={[0, 1.5, 0]}
+        target={[-2.65, 1.62, -4.72]}
       />
     </>
   )

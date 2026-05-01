@@ -77,28 +77,22 @@ const MANAGER_ID = process.env.SIMULATOR_MANAGER_ID || "simulator-lab"
 const MANAGER_NAME = process.env.SIMULATOR_MANAGER_NAME || "Simulator Lab"
 
 const DEVICE_DEFINITIONS: ManagedDevice[] = [
-  lightDevice("sim-ceiling-light", "Ceiling Light", [
+  lightDevice("sim-table-lamp", "Table Lamp", [
     powerCapability(),
     brightnessCapability(),
+    colorCapability(),
   ]),
-  lightDevice("sim-desk-lamp", "Desk Lamp", [powerCapability(), brightnessCapability()]),
-  lightDevice("sim-accent-light", "Accent Light Strip", [
+  lightDevice("sim-corner-leds", "Ceiling Corner LEDs", [
     powerCapability(),
     colorCapability(),
     intensityCapability(),
   ]),
-  plugDevice("sim-switch", "Smart Switch"),
-  plugDevice("sim-plug", "Smart Plug"),
-  {
-    id: "sim-fan",
-    managerId: MANAGER_ID,
-    source: "simulator",
-    type: "fan",
-    name: "Ceiling Fan",
-    online: "online",
-    capabilities: [powerCapability(), speedCapability()],
-  },
-  lightDevice("sim-tv", "TV", [powerCapability(), brightnessCapability()]),
+  lightDevice("sim-accent-light", "Accent Light", [
+    powerCapability(),
+    colorCapability(),
+    intensityCapability(),
+  ]),
+  lightDevice("sim-tv", "TV", [powerCapability()]),
   {
     id: "sim-thermostat",
     managerId: MANAGER_ID,
@@ -111,13 +105,10 @@ const DEVICE_DEFINITIONS: ManagedDevice[] = [
 ]
 
 const INITIAL_STATES: DeviceStateSnapshot[] = [
-  state("sim-ceiling-light", { power: true, brightness: 80 }),
-  state("sim-desk-lamp", { power: true, brightness: 60 }),
-  state("sim-accent-light", { power: true, color: "#ff00ff", intensity: 50 }),
-  state("sim-switch", { power: true }),
-  state("sim-plug", { power: true }),
-  state("sim-fan", { power: true, speed: 70 }),
-  state("sim-tv", { power: true, brightness: 80 }),
+  state("sim-table-lamp", { power: true, brightness: 70, color: "#ffb763" }),
+  state("sim-corner-leds", { power: true, color: "#ff00ff", intensity: 50 }),
+  state("sim-accent-light", { power: true, color: "#43ecff", intensity: 65 }),
+  state("sim-tv", { power: true }),
   state("sim-thermostat", { power: true, temperature: 72, mode: "cool" }),
 ]
 
@@ -267,18 +258,6 @@ function lightDevice(
   }
 }
 
-function plugDevice(id: string, name: string): ManagedDevice {
-  return {
-    id,
-    managerId: MANAGER_ID,
-    source: "simulator",
-    type: "plug",
-    name,
-    online: "online",
-    capabilities: [powerCapability()],
-  }
-}
-
 function state(
   deviceId: string,
   values: DeviceStateSnapshot["values"],
@@ -329,17 +308,6 @@ function colorCapability(): ManagedCapability {
     kind: "color",
     readable: true,
     writable: true,
-  }
-}
-
-function speedCapability(): ManagedCapability {
-  return {
-    id: "speed",
-    label: "Speed",
-    kind: "range",
-    readable: true,
-    writable: true,
-    range: { min: 0, max: 100, step: 1, unit: "percent" },
   }
 }
 

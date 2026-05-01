@@ -18,44 +18,34 @@ const SmartHomeScene = dynamic(() => import("@/components/smart-home/SmartHomeSc
 })
 
 type DeviceKey = NonNullable<SmartHomeSceneProps["selectedDevice"]>
-type ApiControlKey = Exclude<keyof SmartHomeSceneProps, "selectedDevice" | "passiveMode" | "productivityLevel">
+type ApiControlKey = Exclude<keyof SmartHomeSceneProps, "selectedDevice">
 
 const API_CONTROL_MAP: Partial<Record<ApiControlKey, { deviceId: string; capabilityId: string }>> = {
-  ceilingLightOn: { deviceId: "sim-ceiling-light", capabilityId: "power" },
-  ceilingLightBrightness: { deviceId: "sim-ceiling-light", capabilityId: "brightness" },
-  deskLampOn: { deviceId: "sim-desk-lamp", capabilityId: "power" },
-  deskLampBrightness: { deviceId: "sim-desk-lamp", capabilityId: "brightness" },
+  tableLampOn: { deviceId: "sim-table-lamp", capabilityId: "power" },
+  tableLampBrightness: { deviceId: "sim-table-lamp", capabilityId: "brightness" },
+  tableLampColor: { deviceId: "sim-table-lamp", capabilityId: "color" },
+  cornerLedColor: { deviceId: "sim-corner-leds", capabilityId: "color" },
+  cornerLedIntensity: { deviceId: "sim-corner-leds", capabilityId: "intensity" },
   accentLightColor: { deviceId: "sim-accent-light", capabilityId: "color" },
   accentLightIntensity: { deviceId: "sim-accent-light", capabilityId: "intensity" },
-  switchOn: { deviceId: "sim-switch", capabilityId: "power" },
-  plugOn: { deviceId: "sim-plug", capabilityId: "power" },
-  fanOn: { deviceId: "sim-fan", capabilityId: "power" },
-  fanSpeed: { deviceId: "sim-fan", capabilityId: "speed" },
   tvOn: { deviceId: "sim-tv", capabilityId: "power" },
-  tvBrightness: { deviceId: "sim-tv", capabilityId: "brightness" },
   thermostatOn: { deviceId: "sim-thermostat", capabilityId: "power" },
   thermostatTemp: { deviceId: "sim-thermostat", capabilityId: "temperature" },
   thermostatMode: { deviceId: "sim-thermostat", capabilityId: "mode" },
 }
 
 const DEFAULT_STATE: SmartHomeSceneProps = {
-  ceilingLightOn: true,
-  ceilingLightBrightness: 0.8,
-  deskLampOn: true,
-  deskLampBrightness: 0.6,
-  accentLightColor: "#ff00ff",
-  accentLightIntensity: 0.5,
-  switchOn: true,
-  plugOn: true,
-  fanOn: true,
-  fanSpeed: 0.7,
+  tableLampOn: true,
+  tableLampBrightness: 0.7,
+  tableLampColor: "#ffb763",
+  cornerLedColor: "#ff00ff",
+  cornerLedIntensity: 0.5,
+  accentLightColor: "#43ecff",
+  accentLightIntensity: 0.65,
   tvOn: true,
-  tvBrightness: 0.8,
   thermostatOn: true,
   thermostatTemp: 72,
   thermostatMode: "cool",
-  passiveMode: true,
-  productivityLevel: "high",
   selectedDevice: null,
 }
 
@@ -101,23 +91,23 @@ export default function SmartHomeDemoPage() {
     }
 
     const onDeviceStateChange = (event: MessageEvent) => {
-    if (isCancelled) return
+      if (isCancelled) return
 
-    try {
+      try {
         const snapshot = JSON.parse(event.data) as DeviceStateSnapshot
 
         if (!snapshot?.deviceId || !snapshot?.values) {
-        console.warn("Ignoring malformed simulator event:", snapshot)
-        return
+          console.warn("Ignoring malformed simulator event:", snapshot)
+          return
         }
 
         setState((prev) => ({
-        ...prev,
-        ...applySnapshotToSceneState({}, snapshot),
+          ...prev,
+          ...applySnapshotToSceneState({}, snapshot),
         }))
-        } catch (err) {
-            console.error("Failed to parse simulator event:", err, event.data)
-        }
+      } catch (err) {
+        console.error("Failed to parse simulator event:", err, event.data)
+      }
     }
 
     source.addEventListener("connected", onConnected)
@@ -136,8 +126,12 @@ export default function SmartHomeDemoPage() {
   }, [])
 
   return (
-    <div className="flex h-screen bg-background">
-      <div className="flex-1 relative">
+    <div className="flex h-screen flex-col bg-[radial-gradient(circle_at_top_left,#3c4254,#171925_45%,#11131d)] lg:flex-row">
+      <div className="relative min-h-[42vh] flex-1 overflow-hidden lg:min-h-0">
+        <div className="pointer-events-none absolute left-5 top-5 z-10 max-w-[18rem] rounded-xl border border-[#f0b25f]/18 bg-[#11131d]/55 p-3 shadow-xl shadow-black/20 backdrop-blur-sm">
+          <p className="text-[9px] uppercase tracking-[0.24em] text-[#e6ad74]">3D Digital Twin</p>
+          <h2 className="mt-1 text-lg font-semibold tracking-tight text-[#f2e8d8]">Modern smart room</h2>
+        </div>
         <SmartHomeScene {...state} />
         <DeviceSelector
           selectedDevice={state.selectedDevice}
@@ -173,31 +167,21 @@ function applySnapshotToSceneState(
   const values = snapshot.values
 
   switch (snapshot.deviceId) {
-    case "sim-ceiling-light":
-      next.ceilingLightOn = Boolean(values.power)
-      next.ceilingLightBrightness = toUnit(values.brightness)
+    case "sim-table-lamp":
+      next.tableLampOn = Boolean(values.power)
+      next.tableLampBrightness = toUnit(values.brightness)
+      if (typeof values.color === "string") next.tableLampColor = values.color
       break
-    case "sim-desk-lamp":
-      next.deskLampOn = Boolean(values.power)
-      next.deskLampBrightness = toUnit(values.brightness)
+    case "sim-corner-leds":
+      next.cornerLedIntensity = Boolean(values.power) ? toUnit(values.intensity) : 0
+      if (typeof values.color === "string") next.cornerLedColor = values.color
       break
     case "sim-accent-light":
       next.accentLightIntensity = Boolean(values.power) ? toUnit(values.intensity) : 0
       if (typeof values.color === "string") next.accentLightColor = values.color
       break
-    case "sim-switch":
-      next.switchOn = Boolean(values.power)
-      break
-    case "sim-plug":
-      next.plugOn = Boolean(values.power)
-      break
-    case "sim-fan":
-      next.fanOn = Boolean(values.power)
-      next.fanSpeed = toUnit(values.speed)
-      break
     case "sim-tv":
       next.tvOn = Boolean(values.power)
-      next.tvBrightness = toUnit(values.brightness)
       break
     case "sim-thermostat":
       next.thermostatOn = Boolean(values.power)

@@ -1,11 +1,8 @@
-import { CeilingLightControl } from "./CeilingLightControl"
-import { DeskLampControl } from "./DeskLampControl"
+import { TableLampControl } from "./TableLampControl"
+import { CornerLedControl } from "./CornerLedControl"
 import { AccentLightControl } from "./AccentLightControl"
-import { OutletsControl } from "./OutletsControl"
-import { FanControl } from "./FanControl"
 import { TVControl } from "./TVControl"
 import { ThermostatControl } from "./ThermostatControl"
-import { PassiveModeControl } from "./PassiveModeControl"
 import type { SmartHomeSceneProps } from "../smart-home/types"
 
 type Props = {
@@ -15,57 +12,47 @@ type Props = {
 
 export function ControlPanel({ state, onChange }: Props) {
   return (
-    <div className="w-80 border-l border-border bg-card overflow-y-auto p-4 space-y-4">
-      <h1 className="text-xl font-bold text-foreground">Smart Home Controls</h1>
+    <aside className="h-[48vh] w-full overflow-y-auto border-t border-[#c97855]/25 bg-[#202431]/95 p-4 shadow-2xl shadow-black/35 backdrop-blur lg:h-screen lg:w-[20rem] lg:border-l lg:border-t-0">
+      <div className="space-y-4">
+        <div className="rounded-xl border border-[#c97855]/30 bg-gradient-to-br from-[#303645] to-[#222735] p-4">
+          <p className="text-[10px] uppercase tracking-[0.26em] text-[#e6ad74]">Gestura Simulator</p>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-[#f2e8d8]">Engineer Room</h1>
+          <p className="mt-2 text-xs leading-relaxed text-[#c8bfaf]">
+            Live smart-room controls mapped to the 3D device model.
+          </p>
+        </div>
 
-      <CeilingLightControl
-        ceilingLightOn={state.ceilingLightOn}
-        ceilingLightBrightness={state.ceilingLightBrightness}
-        onChange={onChange}
-      />
+        <TableLampControl
+          tableLampOn={state.tableLampOn}
+          tableLampBrightness={state.tableLampBrightness}
+          tableLampColor={state.tableLampColor}
+          onChange={onChange}
+        />
 
-      <DeskLampControl
-        deskLampOn={state.deskLampOn}
-        deskLampBrightness={state.deskLampBrightness}
-        onChange={onChange}
-      />
+        <CornerLedControl
+          cornerLedColor={state.cornerLedColor}
+          cornerLedIntensity={state.cornerLedIntensity}
+          onChange={onChange}
+        />
 
-      <AccentLightControl
-        accentLightColor={state.accentLightColor}
-        accentLightIntensity={state.accentLightIntensity}
-        onChange={onChange}
-      />
+        <AccentLightControl
+          accentLightColor={state.accentLightColor}
+          accentLightIntensity={state.accentLightIntensity}
+          onChange={onChange}
+        />
 
-      <OutletsControl
-        switchOn={state.switchOn}
-        plugOn={state.plugOn}
-        onChange={onChange}
-      />
+        <TVControl
+          tvOn={state.tvOn}
+          onChange={onChange}
+        />
 
-      <FanControl
-        fanOn={state.fanOn}
-        fanSpeed={state.fanSpeed}
-        onChange={onChange}
-      />
-
-      <TVControl
-        tvOn={state.tvOn}
-        tvBrightness={state.tvBrightness}
-        onChange={onChange}
-      />
-
-      <ThermostatControl
-        thermostatOn={state.thermostatOn}
-        thermostatTemp={state.thermostatTemp}
-        thermostatMode={state.thermostatMode}
-        onChange={onChange}
-      />
-
-      <PassiveModeControl
-        passiveMode={state.passiveMode}
-        productivityLevel={state.productivityLevel}
-        onChange={onChange}
-      />
-    </div>
+        <ThermostatControl
+          thermostatOn={state.thermostatOn}
+          thermostatTemp={state.thermostatTemp}
+          thermostatMode={state.thermostatMode}
+          onChange={onChange}
+        />
+      </div>
+    </aside>
   )
 }
