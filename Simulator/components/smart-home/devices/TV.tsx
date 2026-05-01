@@ -25,7 +25,7 @@ export const TV = memo(function TV({
   })
 
   return (
-    <group position={[-2.45, 2.05, -5.035]} scale={[1.18, 1.18, 1]}>
+    <group position={[-1.1, 2.05, -5.035]} scale={[1.18, 1.18, 1]}>
       <pointLight ref={glowRef} position={[0, 0, 0.45]} color="#b03cff" intensity={0} distance={6.6} />
 
       <RoundedBox args={[4.0, 1.95, 0.08]} radius={0.025} castShadow>

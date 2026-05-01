@@ -104,11 +104,11 @@ function LedMoodLighting({
 function LoungeArea() {
   return (
     <group>
-      <RoundedBox args={[4.9, 0.05, 3.25]} position={[-0.7, 0.035, 1.55]} radius={0.08} receiveShadow>
+      <RoundedBox args={[7.2, 0.05, 4.8]} position={[-0.45, 0.035, 1.45]} radius={0.08} receiveShadow>
         <meshStandardMaterial color="#32263a" roughness={0.96} />
       </RoundedBox>
 
-      <group position={[1.05, 0.55, 2.95]}>
+      <group position={[-0.5, 0.55, 2.95]}>
         <RoundedBox args={[4.25, 0.62, 1.0]} position={[0, 0.24, 0]} radius={0.12} castShadow receiveShadow>
           <meshStandardMaterial color="#2a2029" roughness={0.72} />
         </RoundedBox>
@@ -138,7 +138,7 @@ function CoffeeTable({
   lampSelected: boolean
 }) {
   return (
-    <group position={[-1.05, 0, 0.75]}>
+    <group position={[-0.50, 0, 0.75]}>
       <RoundedBox args={[2.45, 0.12, 1.22]} position={[0, 0.48, 0]} radius={0.045} castShadow receiveShadow>
         <meshStandardMaterial color="#2b1c18" roughness={0.55} metalness={0.08} />
       </RoundedBox>
