@@ -22,15 +22,23 @@ function createManagersRouter({ managerService, deviceRegistry, deviceSyncServic
   // });
 
   router.delete('/:managerId', async (req, res) => {
+    const devices = deviceRegistry.getByManager(req.params.managerId);
     const removed = await managerService.unregister(req.params.managerId);
     if (!removed) {
       res.status(404).json({ error: 'Manager not found' });
       return;
     }
 
+    for (const device of devices) {
+      await mappingService?.replaceForDevice?.(device.id, []);
+    }
     await deviceRegistry.clearManagerDevices(req.params.managerId);
     broadcastRegistry({ managerService, deviceRegistry, statusSocketHub: req.app?.locals?.statusSocketHub });
-    res.json({ ok: true, managerId: req.params.managerId });
+    res.json({
+      ok: true,
+      managerId: req.params.managerId,
+      removedDeviceCount: devices.length,
+    });
   });
 
   router.get('/devices', async (_req, res) => {
