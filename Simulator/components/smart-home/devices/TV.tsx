@@ -1,6 +1,6 @@
 import { memo, useRef } from "react"
 import { useFrame } from "@react-three/fiber"
-import { RoundedBox } from "@react-three/drei"
+import { RoundedBox, Html } from "@react-three/drei"
 import * as THREE from "three"
 import { SelectionRing } from "../SelectionRing"
 import type { DeviceProps } from "../types"
@@ -35,37 +35,44 @@ export const TV = memo(function TV({
       <mesh ref={screenRef} position={[0, 0, 0.05]}>
         <planeGeometry args={[3.75, 1.72]} />
         <meshStandardMaterial
-          color={isOn ? "#09091b" : "#030306"}
-          emissive={isOn ? "#7f39ff" : "#000000"}
+          color={isOn ? "#000000" : "#030306"}
+          emissive={isOn ? "#000000" : "#000000"}
           emissiveIntensity={0}
           roughness={0.16}
+          transparent={isOn}
+          opacity={isOn ? 0 : 1}
         />
+        
+        {isOn && (
+          <Html
+            transform
+            position={[0, 0, 0.01]}
+            distanceFactor={2.2}
+            style={{
+              width: '375px',
+              height: '172px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              pointerEvents: 'none',
+              userSelect: 'none',
+              padding: 0,
+              margin: 0,
+            }}
+          >
+            <img 
+              src="/southpark.gif" 
+              alt="TV Content" 
+              style={{ 
+                width: '100%', 
+                height: '100%', 
+                objectFit: 'fill',
+                display: 'block',
+              }} 
+            />
+          </Html>
+        )}
       </mesh>
-
-      {isOn && (
-        <group position={[0, 0, 0.06]}>
-          <mesh position={[-0.48, -0.04, 0.01]} rotation={[0, 0, -0.22]}>
-            <planeGeometry args={[3.05, 0.16]} />
-            <meshStandardMaterial color="#ff7de6" emissive="#9d35ff" emissiveIntensity={1.65} transparent opacity={0.9} />
-          </mesh>
-          <mesh position={[0.22, 0.18, 0.012]} rotation={[0, 0, -0.22]}>
-            <planeGeometry args={[2.0, 0.08]} />
-            <meshStandardMaterial color="#8ec9ff" emissive="#326dff" emissiveIntensity={1.35} transparent opacity={0.78} />
-          </mesh>
-          {[
-            [-1.08, 0.36],
-            [-0.55, 0.14],
-            [0.08, 0.42],
-            [0.72, -0.18],
-            [1.08, 0.26],
-          ].map(([x, y]) => (
-            <mesh key={`${x}-${y}`} position={[x, y, 0.02]}>
-              <sphereGeometry args={[0.018, 8, 8]} />
-              <meshStandardMaterial color="#ffffff" emissive="#ffffff" emissiveIntensity={1.2} />
-            </mesh>
-          ))}
-        </group>
-      )}
 
       <group position={[0, -1.36, 0.42]}>
         <RoundedBox args={[4.55, 0.5, 0.62]} radius={0.035} castShadow receiveShadow>
