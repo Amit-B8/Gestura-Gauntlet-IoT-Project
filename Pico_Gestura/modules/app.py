@@ -510,8 +510,9 @@ class RuntimeApp:
                         else:
                             last_heartbeat_ms = current_ms
 
-                    if self.check_action_ack_timeouts(current_ms):
-                        raise RuntimeError("Action ACK timeout")
+                    # self.check_action_ack_timeouts(current_ms)
+                    # if self.check_action_ack_timeouts(current_ms):
+                    #      raise RuntimeError("Action ACK timeout")
 
                     if (
                         not self.ws_soak_test
@@ -676,21 +677,19 @@ class RuntimeApp:
             return
         if message_type == "mapped_action_ack":
             action_id = message.get("actionId", "")
-            pending = self.pending_action_acks.get(action_id)
+            pending = self.pending_action_acks.pop(action_id, None)
+
             rtt_ms = None
             if pending is not None:
-                pending["acked"] = True
                 rtt_ms = time.ticks_diff(time.ticks_ms(), pending.get("sent_at", time.ticks_ms()))
                 self.status.update(rtt_ms=rtt_ms)
+
             if self.action_debug.enabled():
-                print(
-                    "[DEBUG][action] ack accepted={} actionId={} mappingId={} rtt_ms={}".format(
-                        bool(message.get("accepted", message.get("ok", False))),
-                        action_id,
-                        message.get("mappingId", ""),
-                        rtt_ms if rtt_ms is not None else "?",
-                    )
-                )
+                print("[DEBUG][action] ack accepted={} actionId={} rtt_ms={}".format(
+                    bool(message.get("accepted", message.get("ok", False))),
+                    action_id,
+                    rtt_ms if rtt_ms is not None else "?",
+                ))
             return
         if message_type == "mapped_action_result":
             action_id = message.get("actionId", "")
@@ -1169,12 +1168,11 @@ class RuntimeApp:
         if not self.transport:
             return False
         try:
-            self.send_ws_ping("hb:{}".format(now), "ping")
-            if self.ws_debug.enabled():
-                print("[DEBUG][ws] heartbeat ping sent endpoint={} last_successful_ws_send_ms={}".format(
-                    redact_url(self.active_endpoint) if self.active_endpoint else "none",
-                    self.last_successful_ws_send_ms,
-                ))
+            self.send_ws_json({
+                "type": "heartbeat",
+                "gloveId": self.glove_id,
+                "ts": now,
+            }, "heartbeat")
             return True
         except Exception as exc:
             self.messages_failed += 1
@@ -1301,8 +1299,11 @@ class RuntimeApp:
     def check_action_ack_timeouts(self, now):
         expired = []
         for action_id, pending in self.pending_action_acks.items():
-            if time.ticks_diff(now, pending.get("sent_at", now)) > self.action_ack_timeout_ms:
+            if pending.get("acked"):
                 expired.append(action_id)
+            elif time.ticks_diff(now, pending.get("sent_at", now)) > self.action_ack_timeout_ms:
+                expired.append(action_id)
+
         for action_id in expired:
             pending = self.pending_action_acks.pop(action_id, {})
             action = pending.get("action", {})
@@ -1310,15 +1311,15 @@ class RuntimeApp:
             self.status.update(last_error="Action ACK timeout")
             self.state.message = "ACK timeout"
             self.state.mark_dirty()
-            self.mark_ws_unhealthy("action_ack_timeout", "actionId={}".format(action_id))
+
+            # DO NOT mark websocket unhealthy here.
             if self.action_debug.enabled():
-                print(
-                    "[DEBUG][action] ack timeout actionId={} timeout_ms={} {}".format(
-                        action_id,
-                        self.action_ack_timeout_ms,
-                        describe_action(action),
-                    )
-                )
+                print("[DEBUG][action] ack timeout actionId={} timeout_ms={} {}".format(
+                    action_id,
+                    self.action_ack_timeout_ms,
+                    describe_action(action),
+                ))
+
         return bool(expired)
 
     def mark_ws_unhealthy(self, reason, exc=None):
