@@ -175,6 +175,7 @@ function applySnapshotToSceneState(
     case "sim-corner-leds":
       next.cornerLedIntensity = Boolean(values.power) ? toUnit(values.intensity) : 0
       if (typeof values.color === "string") next.cornerLedColor = values.color
+      if (typeof values.hue === "number") next.cornerLedColor = hueToHex(values.hue)
       break
     case "sim-accent-light":
       next.accentLightIntensity = Boolean(values.power) ? toUnit(values.intensity) : 0
@@ -197,6 +198,27 @@ function applySnapshotToSceneState(
 
 function toUnit(value: DeviceStateSnapshot["values"][string]) {
   return Math.max(0, Math.min(1, Number(value ?? 0) / 100))
+}
+
+function hueToHex(hue: number) {
+  const normalizedHue = ((Math.round(hue) % 360) + 360) % 360
+  const chroma = 1
+  const x = chroma * (1 - Math.abs(((normalizedHue / 60) % 2) - 1))
+  const segment = Math.floor(normalizedHue / 60)
+  const [r, g, b] = [
+    [chroma, x, 0],
+    [x, chroma, 0],
+    [0, chroma, x],
+    [0, x, chroma],
+    [x, 0, chroma],
+    [chroma, 0, x],
+  ][segment] ?? [chroma, 0, 0]
+
+  return `#${toHexChannel(r)}${toHexChannel(g)}${toHexChannel(b)}`
+}
+
+function toHexChannel(value: number) {
+  return Math.round(value * 255).toString(16).padStart(2, "0")
 }
 
 async function postDeviceAction<K extends keyof SmartHomeSceneProps>(

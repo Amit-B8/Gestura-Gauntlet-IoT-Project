@@ -85,6 +85,7 @@ const DEVICE_DEFINITIONS: ManagedDevice[] = [
   lightDevice("sim-corner-leds", "Ceiling Corner LEDs", [
     powerCapability(),
     colorCapability(),
+    hueCapability(),
     intensityCapability(),
   ]),
   lightDevice("sim-accent-light", "Accent Light", [
@@ -106,7 +107,7 @@ const DEVICE_DEFINITIONS: ManagedDevice[] = [
 
 const INITIAL_STATES: DeviceStateSnapshot[] = [
   state("sim-table-lamp", { power: true, brightness: 70, color: "#ffb763" }),
-  state("sim-corner-leds", { power: true, color: "#ff00ff", intensity: 50 }),
+  state("sim-corner-leds", { power: true, color: hueToHex(300), hue: 300, intensity: 50 }),
   state("sim-accent-light", { power: true, color: "#43ecff", intensity: 65 }),
   state("sim-tv", { power: true }),
   state("sim-thermostat", { power: true, temperature: 72, mode: "cool" }),
@@ -187,6 +188,9 @@ export function applyDeviceAction(action: DeviceActionRequest): DeviceActionResu
 
   if (changed) {
     state.values[action.capabilityId] = nextValue
+    if (action.capabilityId === "hue" && typeof nextValue === "number") {
+      state.values.color = hueToHex(nextValue)
+    }
     state.ts = Date.now()
   }
 
@@ -207,7 +211,25 @@ function getStore(): StoreShape {
     }
   }
 
-  return globalThis.__gesturaSimulatorStore
+  const store = globalThis.__gesturaSimulatorStore
+  for (const device of DEVICE_DEFINITIONS) {
+    store.devices.set(device.id, device)
+  }
+  for (const initialState of INITIAL_STATES) {
+    const currentState = store.states.get(initialState.deviceId)
+    if (!currentState) {
+      store.states.set(initialState.deviceId, initialState)
+      continue
+    }
+
+    for (const [key, value] of Object.entries(initialState.values)) {
+      if (currentState.values[key] === undefined) {
+        currentState.values[key] = value
+      }
+    }
+  }
+
+  return store
 }
 
 function getNextValue(
@@ -311,6 +333,17 @@ function colorCapability(): ManagedCapability {
   }
 }
 
+function hueCapability(): ManagedCapability {
+  return {
+    id: "hue",
+    label: "Hue",
+    kind: "range",
+    readable: true,
+    writable: true,
+    range: { min: 0, max: 360, step: 1, unit: "deg" },
+  }
+}
+
 function temperatureCapability(): ManagedCapability {
   return {
     id: "temperature",
@@ -339,4 +372,25 @@ function clampRange(
   max = Number.POSITIVE_INFINITY,
 ) {
   return Math.max(min, Math.min(max, value))
+}
+
+function hueToHex(hue: number) {
+  const normalizedHue = ((Math.round(hue) % 360) + 360) % 360
+  const chroma = 1
+  const x = chroma * (1 - Math.abs(((normalizedHue / 60) % 2) - 1))
+  const segment = Math.floor(normalizedHue / 60)
+  const [r, g, b] = [
+    [chroma, x, 0],
+    [x, chroma, 0],
+    [0, chroma, x],
+    [0, x, chroma],
+    [x, 0, chroma],
+    [chroma, 0, x],
+  ][segment] ?? [chroma, 0, 0]
+
+  return `#${toHexChannel(r)}${toHexChannel(g)}${toHexChannel(b)}`
+}
+
+function toHexChannel(value: number) {
+  return Math.round(value * 255).toString(16).padStart(2, "0")
 }
